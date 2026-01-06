@@ -1,117 +1,81 @@
 import subprocess
 import os
 import json
-import logging
-from memory import save_memory, get_all_memory, init_db
-
-# ------------------ BASIC SETUP ------------------
-
-logging.basicConfig(level=logging.INFO)
+from memory import init_db, save_memory, get_memory, get_all_memory
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPT_PATH = os.path.join(BASE_DIR, "buddy_prompt.txt")
 
+# Initialize memory system
+init_db()
+
 with open(PROMPT_PATH, "r", encoding="utf-8") as f:
     SYSTEM_PROMPT = f.read()
 
-# Initialize DB ONCE
-init_db()
-
-# ------------------ MEMORY HANDLING ------------------
-
-def build_memory_context():
-    """
-    Inject only relevant, human-usable memory.
-    Avoid dumping everything.
-    """
-    memory = get_all_memory(min_confidence=0.5)
-
-    filtered = {}
-
-    for key in memory:
-        if key in ["name", "preference", "likes", "dislikes"]:
-            filtered[key] = memory[key]
-
-    if not filtered:
-        return ""
-
-    return (
-        "Known user information (use naturally, do not repeat unless relevant):\n"
-        + json.dumps(filtered, indent=2)
-    )
-
-# ------------------ AI CORE ------------------
 
 def ask_buddy(user_input):
-    memory_context = build_memory_context()
+    # Get current memory context
+    memory_context = get_all_memory()
+    name_known = "name" in memory_context or "user_name" in memory_context
 
-    prompt = (
-        SYSTEM_PROMPT
-        + "\n"
-        + memory_context
-        + "\nUser: "
-        + user_input
-        + "\nAssistant:"
+    # Build context-aware prompt
+    context = f"Current memory: {json.dumps(memory_context)}\nname_known: {name_known}\n"
+    prompt = SYSTEM_PROMPT + "\n" + context + "\nUser: " + user_input + "\nAssistant:"
+
+    result = subprocess.run(
+        ["ollama", "run", "llama3.2:3b"],
+        input=prompt,
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+        errors="ignore"
     )
 
+    response = result.stdout.strip()
+
+    # Process memory operations if JSON response
     try:
-        result = subprocess.run(
-            ["ollama", "run", "llama3.2:3b"],
-            input=prompt,
-            text=True,
-            capture_output=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=90  # prevents infinite hang
-        )
-    except Exception as e:
-        logging.error(f"[OLLAMA ERROR] {e}")
-        return {
-            "reply": "Sorry, I felt a bit off just now. Can you say that again?",
-            "emotion": "confused",
-            "intent": "none"
+        data = json.loads(response)
+        
+        """
+        Generalized memory handling:
+        - If model wants to store memory
+        - Ensure reply exists
+        - Ensure memory schema is complete
+        """
+        
+        # Normalize response structure - keep original memory data if present
+        normalized = {
+            "reply": data.get("reply", ""),
+            "emotion": data.get("emotion", "neutral"),
+            "intent": data.get("intent", "unknown"),
+            "memory": data.get("memory", {
+                "store": False,
+                "key": "",
+                "value": "",
+                "confidence": 0.0
+            })
         }
+        
+        # Validate and store memory if needed
+        memory = normalized["memory"]
+        if memory.get("store") and memory.get("key") and memory.get("value"):
+            save_memory(memory["key"], memory["value"], memory.get("confidence", 0.7))
+        
+        return json.dumps(normalized, indent=2)
+        
+    except Exception:
+        return response
 
-    output = result.stdout.strip()
 
-    try:
-        response = json.loads(output)
-    except json.JSONDecodeError:
-        logging.warning("[JSON ERROR] Model output was not valid JSON.")
-        return {
-            "reply": "I didn’t quite catch that properly. Let’s try again.",
-            "emotion": "uncertain",
-            "intent": "none"
-        }
+if __name__ == "__main__":
+    print("BUDDY is awake. Type something.\n")
 
-    # ------------------ MEMORY SAVE ------------------
+    while True:
+        user = input("You: ")
 
-    mem = response.get("memory", {})
-    if (
-        isinstance(mem, dict)
-        and mem.get("store") is True
-        and mem.get("key")
-        and mem.get("value")
-    ):
-        try:
-            confidence = float(mem.get("confidence", 0.7))
-            save_memory(mem["key"], mem["value"], confidence)
-        except Exception as e:
-            logging.error(f"[MEMORY SAVE ERROR] {e}")
+        if user.lower() in ["exit", "quit"]:
+            break
 
-    return response
-
-# ------------------ INTERACTION LOOP ------------------
-
-print("BUDDY is awake. Type something.\n(Type 'exit' to quit)\n")
-
-while True:
-    user = input("You: ").strip()
-
-    if user.lower() in ["exit", "quit"]:
-        print("BUDDY: See you soon. Take care 🌙")
-        break
-
-    response = ask_buddy(user)
-
-    print("\nBUDDY:", response.get("reply", ""), "\n")
+        response = ask_buddy(user)
+        print(f"\nBUDDY: {response}\n")
