@@ -32,6 +32,10 @@ class IntegratedBuddy:
             self.unknown_face_img = None
             self.user_input = ""
             
+            # Recognition smoothing
+            self.recognition_history = []
+            self.history_size = 5
+            
             # AI processing
             self.ai_queue = queue.Queue()
             self.response_queue = queue.Queue()
@@ -81,16 +85,26 @@ class IntegratedBuddy:
         
         for name, known_embedding in self.known_faces.items():
             distance = cosine(embedding, known_embedding)
-            print(f"[DEBUG] Distance to {name}: {distance:.3f}")
             if distance < min_distance:
                 min_distance = distance
                 best_match = name
         
-        print(f"[DEBUG] Best match: {best_match}, distance: {min_distance:.3f}, threshold: {self.threshold}")
+        current_result = (best_match if min_distance < self.threshold else "Unknown", 1 - min_distance if min_distance < self.threshold else 0.0)
         
-        if min_distance < self.threshold:
-            return best_match, 1 - min_distance
-        return "Unknown", 0.0
+        # Add to history for smoothing
+        self.recognition_history.append(current_result[0])
+        if len(self.recognition_history) > self.history_size:
+            self.recognition_history.pop(0)
+        
+        # Use majority vote for stable recognition
+        if len(self.recognition_history) >= 3:
+            name_counts = {}
+            for name in self.recognition_history:
+                name_counts[name] = name_counts.get(name, 0) + 1
+            stable_name = max(name_counts, key=name_counts.get)
+            return stable_name, current_result[1]
+        
+        return current_result
     
     def load_known_faces(self):
         """Load known faces from database"""
@@ -185,27 +199,28 @@ class IntegratedBuddy:
             current_time = time.time()
             
             if name != "Unknown":
-                # Known user detected
-                if not self.session_started:
-                    # Start new session with this user
-                    self.active_user = name
-                    self.session_started = True
-                    save_memory("name", name, 0.95)
-                    if self.send_to_ai(f"I can see {name} is here. Greet them warmly as your dedicated companion."):
-                        print(f"\n[SESSION] Started dedicated session with {name}")
-                    
-                elif self.active_user != name:
-                    # Different user detected - check if should switch
-                    if (current_time - self.last_face_time) > self.user_switch_threshold:
-                        # Switch to new user after threshold
-                        old_user = self.active_user
+                # Known user detected - only start session if confidence is high enough
+                if confidence > 0.7:  # Only start session with confident recognition
+                    if not self.session_started:
+                        # Start new session with this user
                         self.active_user = name
+                        self.session_started = True
                         save_memory("name", name, 0.95)
-                        if self.send_to_ai(f"I see {name} is now here. Say goodbye to {old_user} and greet {name} as your new companion."):
-                            print(f"\n[SESSION] Switched from {old_user} to {name}")
-                    # else: ignore brief appearances of other users
-                    
-                self.last_face_time = current_time
+                        if self.send_to_ai(f"I can see {name} is here. Greet them warmly as your dedicated companion."):
+                            print(f"\n[SESSION] Started dedicated session with {name}")
+                        
+                    elif self.active_user != name:
+                        # Different user detected - check if should switch
+                        if (current_time - self.last_face_time) > self.user_switch_threshold:
+                            # Switch to new user after threshold
+                            old_user = self.active_user
+                            self.active_user = name
+                            save_memory("name", name, 0.95)
+                            if self.send_to_ai(f"I see {name} is now here. Say goodbye to {old_user} and greet {name} as your new companion."):
+                                print(f"\n[SESSION] Switched from {old_user} to {name}")
+                        # else: ignore brief appearances of other users
+                        
+                    self.last_face_time = current_time
                 
             else:
                 # Unknown user
@@ -218,7 +233,7 @@ class IntegratedBuddy:
                             x, y, w, h = bbox
                             self.unknown_face_img = self.current_frame[y:y+h, x:x+w]
                         
-                        if self.send_to_ai("I see someone new. Introduce yourself warmly and ask for their name to start our companion session."):
+                        if self.send_to_ai("Hi! I'm Buddy, your AI companion. I don't recognize you yet. Could you please tell me your name so I can remember you?"):
                             print(f"\n[SESSION] New unknown user detected")
         except Exception as e:
             print(f"\n[SESSION ERROR] {e}")
