@@ -47,17 +47,29 @@ def get_db():
 
 def init_db():
     """
-    Initialize memory table.
+    Initialize memory and faces tables.
     Call this ONCE when app starts.
     """
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Memory table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS memory (
                     key TEXT PRIMARY KEY,
                     value TEXT,
                     confidence FLOAT DEFAULT 1.0,
                     last_updated TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            # Faces table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS faces (
+                    name TEXT PRIMARY KEY,
+                    embedding TEXT,
+                    confidence FLOAT DEFAULT 1.0,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    last_seen TIMESTAMP DEFAULT NOW()
                 )
             """)
             conn.commit()
@@ -129,3 +141,81 @@ def get_all_memory(min_confidence=0.0):
             memory[row["key"]] = row["value"]
 
     return memory
+
+# ------------------ FACE OPERATIONS ------------------
+
+def save_face(name, embedding, confidence=1.0):
+    """
+    Store or update face embedding.
+    """
+    try:
+        embedding_str = json.dumps(embedding.tolist() if hasattr(embedding, 'tolist') else embedding)
+    except Exception:
+        embedding_str = str(embedding)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO faces (name, embedding, confidence, created_at, last_seen)
+                VALUES (%s, %s, %s, NOW(), NOW())
+                ON CONFLICT (name)
+                DO UPDATE SET
+                    embedding = EXCLUDED.embedding,
+                    confidence = EXCLUDED.confidence,
+                    last_seen = NOW()
+            """, (name, embedding_str, confidence))
+            conn.commit()
+
+def get_face(name):
+    """
+    Fetch a face embedding by name.
+    Returns numpy array or None.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT embedding FROM faces WHERE name = %s",
+                (name,)
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+            try:
+                import numpy as np
+                return np.array(json.loads(row[0]))
+            except Exception:
+                return None
+
+def get_all_faces():
+    """
+    Fetch all face embeddings.
+    Returns dict of {name: embedding}.
+    """
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT name, embedding FROM faces")
+            rows = cur.fetchall()
+
+    faces = {}
+    for row in rows:
+        try:
+            import numpy as np
+            faces[row["name"]] = np.array(json.loads(row["embedding"]))
+        except Exception:
+            continue
+
+    return faces
+
+def update_face_name(old_name, new_name):
+    """
+    Update face name in database.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE faces SET name = %s WHERE name = %s",
+                (new_name, old_name)
+            )
+            conn.commit()
+            return cur.rowcount > 0

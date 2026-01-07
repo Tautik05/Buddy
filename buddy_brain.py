@@ -1,6 +1,7 @@
 import subprocess
 import os
 import json
+import html
 from memory import init_db, save_memory, get_memory, get_all_memory
 from smart_memory import intelligent_memory_save
 
@@ -25,16 +26,25 @@ def ask_buddy(user_input):
     context = f"Current memory: {json.dumps(memory_context)}\nname_known: {name_known}\n{greeting_instruction}"
     prompt = SYSTEM_PROMPT + "\n" + context + "\nUser: " + user_input + "\nAssistant:"
 
-    result = subprocess.run(
-        ["ollama", "run", "llama3.2:3b"],
-        input=prompt,
-        text=True,
-        capture_output=True,
-        encoding="utf-8",
-        errors="ignore"
-    )
+    try:
+        result = subprocess.run(
+            ["ollama", "run", "llama3.2:3b"],
+            input=prompt,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=30  # 30 second timeout
+        )
+    except subprocess.TimeoutExpired:
+        return "Sorry, I'm taking too long to respond. Please try again."
+    except Exception as e:
+        return f"Error communicating with AI: {str(e)}"
 
     response = result.stdout.strip()
+    
+    # Decode HTML entities
+    response = html.unescape(response)
 
     # Process memory operations if JSON response
     try:
