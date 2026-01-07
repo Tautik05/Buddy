@@ -13,7 +13,7 @@ from buddy_brain import ask_buddy
 from memory import save_memory, get_memory, save_face, get_all_faces, update_face_name
 
 class IntegratedBuddy:
-    def __init__(self, model_path="face-recog/MobileFaceNet.onnx", threshold=0.6):
+    def __init__(self, model_path="face-recog/MobileFaceNet.onnx", threshold=0.25):
         try:
             self.threshold = threshold
             self.session = ort.InferenceSession(model_path)
@@ -81,9 +81,12 @@ class IntegratedBuddy:
         
         for name, known_embedding in self.known_faces.items():
             distance = cosine(embedding, known_embedding)
+            print(f"[DEBUG] Distance to {name}: {distance:.3f}")
             if distance < min_distance:
                 min_distance = distance
                 best_match = name
+        
+        print(f"[DEBUG] Best match: {best_match}, distance: {min_distance:.3f}, threshold: {self.threshold}")
         
         if min_distance < self.threshold:
             return best_match, 1 - min_distance
