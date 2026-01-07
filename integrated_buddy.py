@@ -33,18 +33,48 @@ class IntegratedBuddy:
             
             # Face recognition control
             self.last_recognition_time = 0
-            self.recognition_interval = 8  # Increased to 8 seconds for stability
+            self.recognition_interval = 30  # Increased to 30 seconds
             
             self.current_faces = []
             self.current_frame = None
             
             self.load_known_faces()
             
-            # Initial greeting with error handling
+            # Initial face check and greeting
             try:
                 memory_context = get_all_memory()
                 print(f"[DEBUG] Memory context: {memory_context}")
-                response = ask_buddy("System starting. Greet the user briefly.")
+                
+                # Do immediate face recognition at startup
+                cap = cv2.VideoCapture(0)
+                if cap.isOpened():
+                    ret, frame = cap.read()
+                    if ret:
+                        faces = self.detect_faces(frame)
+                        if faces is not None and len(faces) > 0:
+                            largest_face = max(faces, key=lambda f: f[2] * f[3])
+                            x, y, w, h = largest_face
+                            if w > 100 and h > 100:
+                                face_roi = frame[y:y+h, x:x+w]
+                                name, confidence = self.recognize_face(face_roi)
+                                if name != "Unknown" and confidence > 0.6:
+                                    self.active_user = name
+                                    save_memory("name", name, 0.95)
+                                    response = ask_buddy(f"I can see {name} is here. Greet them warmly.")
+                                else:
+                                    self.unknown_face_img = face_roi
+                                    self.face_recognized = True
+                                    response = ask_buddy("I see someone new. Introduce yourself and ask their name.")
+                            else:
+                                response = ask_buddy("System starting. Greet the user briefly.")
+                        else:
+                            response = ask_buddy("System starting. Greet the user briefly.")
+                    else:
+                        response = ask_buddy("System starting. Greet the user briefly.")
+                    cap.release()
+                else:
+                    response = ask_buddy("System starting. Greet the user briefly.")
+                    
                 self.display_response(response)
             except Exception as e:
                 print(f"[INIT WARNING] Initial greeting failed: {e}")
@@ -246,7 +276,7 @@ class IntegratedBuddy:
     def run(self):
         print("Buddy - AI Companion System")
         print("- Robust operation with error handling")
-        print("- Face recognition every 8 seconds")
+        print("- Face recognition every 30 seconds")
         print("- Press 'q' in video window or type 'exit' to stop\n")
         
         cap = None
