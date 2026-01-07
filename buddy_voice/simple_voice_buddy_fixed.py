@@ -49,8 +49,8 @@ class VoiceBuddy:
             self.recognizer.adjust_for_ambient_noise(source, duration=1)
             # Adjust energy threshold for better detection
             self.recognizer.energy_threshold = 300
-            self.recognizer.pause_threshold = 2.0  # Wait 2 seconds of silence before stopping
-            self.recognizer.dynamic_energy_threshold = True  # Automatically adjust to background noise
+            self.recognizer.pause_threshold = 1.0  # Reduce to 1 second for faster response
+            self.recognizer.dynamic_energy_threshold = True
         print("Google Speech Recognition initialized")
         
     def speak(self, text, emotion="neutral", intent="unknown"):
@@ -98,39 +98,38 @@ class VoiceBuddy:
                 self.tts.runAndWait()
             except Exception as e2:
                 pass
-        time.sleep(0.3)
+        time.sleep(0.1)  # Reduce delay after speech
     
-    def listen_for_speech_dynamic(self, timeout=30):
-        """Dynamic listening that detects when you stop speaking"""
+    def listen_for_speech_dynamic(self, timeout=15):
+        """Fast dynamic listening"""
         try:
             with self.microphone as source:
-                print("Listening... (speak naturally, I'll wait for you to finish)")
+                print("Listening...")
                 
-                # Start listening without time limit on phrase
+                # Faster listening with shorter timeout
                 audio = self.recognizer.listen(
                     source, 
                     timeout=timeout, 
-                    phrase_time_limit=None  # No limit - wait for natural pause
+                    phrase_time_limit=10  # Max 10 seconds per phrase
                 )
                 
-            print("Processing speech...")
+            print("Processing...")
             text = self.recognizer.recognize_google(audio)
             
             if text:
-                print(f"Complete speech: '{text}'")
+                print(f"You said: '{text}'")
                 speaker, confidence = self.identify_speaker_from_audio(audio)
                 return text, speaker, confidence
             
             return "", "Unknown", 0.0
             
         except sr.WaitTimeoutError:
-            print("No speech detected")
             return "", "Unknown", 0.0
         except sr.UnknownValueError:
-            print("Could not understand audio")
+            print("Didn't catch that")
             return "", "Unknown", 0.0
         except sr.RequestError as e:
-            print(f"Error with speech recognition: {e}")
+            print(f"Speech error: {e}")
             return "", "Unknown", 0.0
     
     def identify_speaker_from_audio(self, audio):
@@ -185,7 +184,7 @@ class VoiceBuddy:
     def enroll_new_user(self):
         """Enroll new speaker with voice recording"""
         self.speak("Hello! I don't recognize your voice yet.")
-        
+    
         name = self.get_name_from_speech()
         if not name:
             self.speak("I'm having trouble understanding your name. Let's try later.")
