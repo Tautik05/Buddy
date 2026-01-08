@@ -379,7 +379,19 @@ class IntegratedBuddy:
         
         self._processing_input = True
         try:
-            response = ask_buddy(user_text, recognized_user=self.sleep_wake.active_user)
+            # Add object context if available
+            context_parts = []
+            if self.sleep_wake.active_user:
+                context_parts.append(f"User {self.sleep_wake.active_user} says")
+            
+            # Add object context
+            if self.stable_objects:
+                objects_list = ', '.join(self.stable_objects)
+                context_parts.append(f"Objects visible: {objects_list}")
+            
+            full_message = f"[CONTEXT: {', '.join(context_parts)}] {user_text}" if context_parts else user_text
+            
+            response = ask_buddy(full_message, recognized_user=self.sleep_wake.active_user)
             if response:  # Only process if not None (not skipped)
                 self._display_response(response)
         except Exception as e:
@@ -524,7 +536,19 @@ class IntegratedBuddy:
         
         # Regular conversation - simplified to avoid duplicate processing
         try:
-            response = ask_buddy(user_text, recognized_user=self.sleep_wake.active_user)
+            # Add object context if available
+            context_parts = []
+            if self.sleep_wake.active_user:
+                context_parts.append(f"User {self.sleep_wake.active_user} says")
+            
+            # Add object context
+            if self.stable_objects:
+                objects_list = ', '.join(self.stable_objects)
+                context_parts.append(f"Objects visible: {objects_list}")
+            
+            full_message = f"[CONTEXT: {', '.join(context_parts)}] {user_text}" if context_parts else user_text
+            
+            response = ask_buddy(full_message, recognized_user=self.sleep_wake.active_user)
             if response:  # Only display if not None (not skipped)
                 self._display_response(response)
         except Exception as e:
