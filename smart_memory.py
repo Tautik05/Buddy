@@ -3,19 +3,19 @@ import json
 from memory import save_memory, get_memory
 
 def extract_comprehensive_info(text, current_memory):
-    """Extract all possible information from natural conversation"""
+    """Extract all possible information from natural conversation (excluding names)"""
     text_lower = text.strip().lower()
     info = {}
     
-    # Universal patterns for any information type
+    # Universal patterns for any information type (excluding name patterns)
     universal_patterns = [
-        # Direct statements
-        r"i am\s+([^.!?\n]+)",
-        r"i'm\s+([^.!?\n]+)",
-        r"my\s+(\w+)\s+is\s+([^.!?\n]+)",
+        # Direct statements (excluding name-related ones)
+        r"i am\s+(\d+)\s*(?:years?\s*old)?",  # Age only
+        r"i'm\s+(\d+)\s*(?:years?\s*old)?",   # Age only
+        r"my\s+(age|location|job|work|occupation)\s+is\s+([^.!?\n]+)",
         r"i have\s+([^.!?\n]+)",
-        r"i live\s+([^.!?\n]+)",
-        r"i work\s+([^.!?\n]+)",
+        r"i live\s+(?:in\s+)?([^.!?\n]+)",
+        r"i work\s+(?:as\s+|at\s+)?([^.!?\n]+)",
         r"i study\s+([^.!?\n]+)",
         r"i like\s+([^.!?\n]+)",
         r"i love\s+([^.!?\n]+)",
@@ -27,23 +27,19 @@ def extract_comprehensive_info(text, current_memory):
         r"i speak\s+([^.!?\n]+)",
         
         # Corrections and clarifications
-        r"actually\s+([^.!?\n]+)",
-        r"no[,\s]+([^.!?\n]+)",
-        r"not\s+([^.!?\n]+)[,\s]+([^.!?\n]+)",
-        r"it's\s+([^.!?\n]+)",
-        r"that's\s+([^.!?\n]+)",
+        r"actually\s+i\s+(?:am|live|work|study|like|love)\s+([^.!?\n]+)",
+        r"no[,\s]+i\s+(?:am|live|work|study|like|love)\s+([^.!?\n]+)",
         
-        # Possessive statements
-        r"my\s+(\w+)\s+([^.!?\n]+)",
-        r"our\s+(\w+)\s+([^.!?\n]+)",
+        # Possessive statements (excluding name)
+        r"my\s+(hobby|hobbies|favorite|favourite|pet|car|house|family)\s+([^.!?\n]+)",
         
         # Time and dates
         r"(\w+day)\s+([^.!?\n]+)",
         r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+([^.!?\n]+)",
         r"(\d{1,2})[st|nd|rd|th]*\s+of\s+(\w+)",
         
-        # Relationships
-        r"my\s+(friend|brother|sister|mother|father|parent|family|wife|husband|partner)\s+([^.!?\n]+)",
+        # Relationships (excluding name extraction)
+        r"my\s+(friend|brother|sister|mother|father|parent|family|wife|husband|partner)\s+(?:is|lives|works|likes)\s+([^.!?\n]+)",
     ]
     
     # Extract using universal patterns
@@ -63,10 +59,7 @@ def extract_comprehensive_info(text, current_memory):
                 if key and value and len(value) > 1:
                     info[key] = value
     
-    # Specific name extraction (highest priority)
-    name = extract_name_specifically(text_lower)
-    if name:
-        info['name'] = name
+    # Skip name extraction - names come from face recognition
     
     return info
 
@@ -145,21 +138,23 @@ def determine_info_type(full_match, value):
     return 'info'
 
 def intelligent_memory_save(user_input, intent, current_memory):
-    """Comprehensive memory extraction from any natural conversation"""
+    """Comprehensive memory extraction from any natural conversation (excluding names)"""
     memory_ops = []
     
-    # Extract all possible information
+    # Extract all possible information (excluding names)
     extracted_info = extract_comprehensive_info(user_input, current_memory)
     
     # Process each piece of extracted information
     for key, value in extracted_info.items():
+        # Skip name-related keys since names come from face recognition
+        if key in ['name', 'user_name', 'my_name', 'called']:
+            continue
+            
         current_value = current_memory.get(key)
         
         # Determine confidence based on key type and context
         confidence = 0.7
-        if key == 'name':
-            confidence = 0.95
-        elif any(phrase in user_input.lower() for phrase in ['actually', 'no', 'not', 'correction']):
+        if any(phrase in user_input.lower() for phrase in ['actually', 'no', 'not', 'correction']):
             confidence = 0.9  # Higher confidence for corrections
         
         # Only save if new or different
