@@ -150,6 +150,18 @@ class IntegratedBuddy:
                 time.sleep(0.1)
             
             print("Could not recognize face after startup attempts\n")
+            # Set up for name learning if we have a face
+            ret, frame = self.cap.read()
+            if ret:
+                faces = self.detector.detect(frame)
+                if faces:
+                    largest_face = self.detector.get_largest_face(faces)
+                    x, y, w, h = largest_face
+                    if w > 80 and h > 80:
+                        self.unknown_face_img = frame[y:y+h, x:x+w]
+                        self.awaiting_name = True
+                        print("DEBUG: Stored unknown face for learning")
+            
             context = "[CONTEXT: Unknown person detected on camera at startup]"
             prompt = f"{context} Hello! I don't think we've met before. What's your name?"
             response = ask_buddy(prompt)
@@ -263,14 +275,25 @@ class IntegratedBuddy:
         
         # Learning new name
         if self.awaiting_name and self.unknown_face_img is not None:
-            name_match = re.search(
+            # Enhanced name detection patterns
+            name_patterns = [
                 r"(?:i'?m|my name is|call me|i am|name'?s|this is)\s+([a-zA-Z]+)",
-                user_text.lower()
-            )
+                r"^([a-zA-Z]+)$",  # Just a single name
+                r"it'?s\s+([a-zA-Z]+)",
+                r"([a-zA-Z]+)\s*(?:here|speaking)"
+            ]
             
-            if name_match:
-                name = name_match.group(1).capitalize()
+            name = None
+            for pattern in name_patterns:
+                match = re.search(pattern, user_text.lower())
+                if match:
+                    name = match.group(1).capitalize()
+                    break
+            
+            if name:
+                print(f"DEBUG: Detected name '{name}' from input '{user_text}'")
                 if self.recognizer.add_face(name, self.unknown_face_img):
+                    print(f"DEBUG: Successfully added face for {name}")
                     self.sleep_wake.active_user = name
                     self.unknown_face_img = None
                     self.awaiting_name = False
@@ -279,6 +302,8 @@ class IntegratedBuddy:
                     response = ask_buddy(context, recognized_user=name)
                     self._display_response(response)
                     return True
+                else:
+                    print(f"DEBUG: Failed to add face for {name}")
         
         # Regular conversation
         context_parts = []
