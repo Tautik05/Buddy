@@ -47,90 +47,59 @@ class VoiceBuddy:
         # Calibrate microphone for better sensitivity
         with self.microphone as source:
             self.recognizer.adjust_for_ambient_noise(source, duration=1)
-            # Adjust energy threshold for better detection
             self.recognizer.energy_threshold = 300
-            self.recognizer.pause_threshold = 2.0  # Wait 2 seconds of silence before stopping
-            self.recognizer.dynamic_energy_threshold = True  # Automatically adjust to background noise
+            self.recognizer.pause_threshold = 1.0  # Reduce to 1 second for faster response
+            self.recognizer.dynamic_energy_threshold = True
         print("Google Speech Recognition initialized")
         
     def speak(self, text, emotion="neutral", intent="unknown"):
-        """Convert text to speech with emotion and intent"""
+        """Convert text to speech with fallback options"""
         if not text or text.strip() == "":
             return
             
+        print(f"Buddy: {text}")  # Always print what we're trying to say
+        
         try:
-            # Try Windows SAPI first with emotion and intent
+            # Simple pyttsx3 approach first
+            self.tts.say(text)
+            self.tts.runAndWait()
+            return
+        except Exception as e:
+            print(f"TTS Error: {e}")
+            
+        try:
+            # Try Windows SAPI as backup
             import win32com.client
             speaker = win32com.client.Dispatch("SAPI.SpVoice")
-            
-            # Adjust voice settings based on emotion and intent
-            if intent == "ask_question" or "?" in text:
-                speaker.Rate = 1  # Slightly faster for questions
-                # Add slight pause before questions
-                time.sleep(0.2)
-            elif emotion == "happy" or emotion == "excited":
-                speaker.Rate = 2  # Faster and energetic
-            elif emotion == "sad" or emotion == "tired":
-                speaker.Rate = -2  # Slower and subdued
-            elif emotion == "curious":
-                speaker.Rate = 1  # Slightly faster for curiosity
-            elif intent == "greeting":
-                speaker.Rate = 0  # Normal, warm greeting
-            else:
-                speaker.Rate = 0  # Normal
-            
             speaker.Speak(text)
-        except Exception as e:
-            try:
-                # Fallback to pyttsx3 with emotion and intent
-                if intent == "ask_question" or "?" in text:
-                    self.tts.setProperty('rate', 160)
-                elif emotion == "happy" or emotion == "excited":
-                    self.tts.setProperty('rate', 180)
-                elif emotion == "sad" or emotion == "tired":
-                    self.tts.setProperty('rate', 120)
-                elif emotion == "curious":
-                    self.tts.setProperty('rate', 160)
-                else:
-                    self.tts.setProperty('rate', 150)
-                    
-                self.tts.say(text)
-                self.tts.runAndWait()
-            except Exception as e2:
-                pass
-        time.sleep(0.3)
+        except Exception as e2:
+            print(f"SAPI Error: {e2}")
+            print("Speech synthesis failed - check audio drivers")
     
-    def listen_for_speech_dynamic(self, timeout=30):
-        """Dynamic listening that detects when you stop speaking"""
+    def listen_for_speech_dynamic(self, timeout=15):
+        """Fast dynamic listening"""
         try:
             with self.microphone as source:
-                print("Listening... (speak naturally, I'll wait for you to finish)")
+                print("Listening...")
+                audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=8)
                 
-                # Start listening without time limit on phrase
-                audio = self.recognizer.listen(
-                    source, 
-                    timeout=timeout, 
-                    phrase_time_limit=None  # No limit - wait for natural pause
-                )
-                
-            print("Processing speech...")
+            print("Processing...")
             text = self.recognizer.recognize_google(audio)
             
             if text:
-                print(f"Complete speech: '{text}'")
+                print(f"You said: '{text}'")
                 speaker, confidence = self.identify_speaker_from_audio(audio)
                 return text, speaker, confidence
             
             return "", "Unknown", 0.0
             
         except sr.WaitTimeoutError:
-            print("No speech detected")
             return "", "Unknown", 0.0
         except sr.UnknownValueError:
-            print("Could not understand audio")
+            print("Didn't catch that")
             return "", "Unknown", 0.0
         except sr.RequestError as e:
-            print(f"Error with speech recognition: {e}")
+            print(f"Speech error: {e}")
             return "", "Unknown", 0.0
     
     def identify_speaker_from_audio(self, audio):
@@ -150,59 +119,6 @@ class VoiceBuddy:
             print(f"Speaker identification error: {e}")
         
         return "Unknown", 0.0
-    
-    def get_name_from_speech(self):
-        """Get name with confirmation"""
-        for attempt in range(3):
-            self.speak("Please tell me your name clearly.")
-            text, _, _ = self.listen_for_speech(timeout=8)
-            
-            print(f"Name attempt {attempt+1}: '{text}'")  # Debug
-            
-            if text:
-                words = text.lower().split()
-                skip_words = ['my', 'name', 'is', 'i', 'am', 'call', 'me']
-                name = None
-                
-                for word in words:
-                    if word not in skip_words and len(word) > 1:
-                        name = word.capitalize()
-                        break
-                
-                if name:
-                    self.speak(f"Did you say your name is {name}? Say yes or no.")
-                    response, _, _ = self.listen_for_speech(timeout=5)
-                    
-                    print(f"Confirmation: '{response}'")  # Debug
-                    
-                    if response and 'yes' in response.lower():
-                        return name
-                    
-            self.speak("I didn't understand. Let me try again.")
-        
-        return None
-    
-    def enroll_new_user(self):
-        """Enroll new speaker with voice recording"""
-        self.speak("Hello! I don't recognize your voice yet.")
-    
-        name = self.get_name_from_speech()
-        if not name:
-            self.speak("I'm having trouble understanding your name. Let's try later.")
-            return None
-            
-        self.speak(f"Nice to meet you, {name}! I'll record your voice for 10 seconds. Please speak naturally about anything.")
-        
-        audio_file = f"{name}_sample.wav"
-        record_audio(audio_file, duration=10)
-        
-        self.sr.enroll_speaker(name, audio_file)
-        self.sr.save_speakers()
-        
-        save_memory("name", name)
-        
-        self.speak(f"Perfect! I've learned your voice, {name}!")
-        return name
 
 def ask_buddy(user_input):
     # Get current memory context
@@ -274,13 +190,11 @@ def run_voice_buddy():
             
             # Check if it's a name introduction
             if "my name is" in text.lower():
-                # Extract name and enroll
                 words = text.lower().replace("my name is", "").strip().split()
                 if words:
                     name = words[0].capitalize()
                     buddy.speak(f"Nice to meet you, {name}! Let me record your voice for 10 seconds.")
                     
-                    # Record and enroll
                     audio_file = f"{name}_sample.wav"
                     record_audio(audio_file, duration=10)
                     buddy.speaker_sr.enroll_speaker(name, audio_file)
@@ -296,7 +210,53 @@ def run_voice_buddy():
                 buddy.speak("I don't recognize your voice. Please say 'My name is' followed by your name.")
                 continue
             
-            # Process with Buddy AI (pass speaker name for personalization)
+            # Process with Buddy AI
+            response = ask_buddy(f"Speaker: {speaker}. {text}")
+            
+            # Extract emotion, intent and reply from AI response
+            try:
+                response_data = json.loads(response)
+                reply = response_data.get("reply", response)
+                emotion = response_data.get("emotion", "neutral")
+                intent = response_data.get("intent", "unknown")
+            except:
+                reply = response
+                emotion = "neutral"
+                intent = "unknown"
+            
+            buddy.speak(reply, emotion, intent)
+            
+            # Exit condition
+            if any(word in text.lower() for word in ["goodbye", "bye", "exit", "quit"]):
+                break
+            
+    except KeyboardInterrupt:
+        buddy.speak("Goodbye!")
+
+if __name__ == "__main__":
+    run_voice_buddy()ction
+            if "my name is" in text.lower():
+                words = text.lower().replace("my name is", "").strip().split()
+                if words:
+                    name = words[0].capitalize()
+                    buddy.speak(f"Nice to meet you, {name}! Let me record your voice for 10 seconds.")
+                    
+                    audio_file = f"{name}_sample.wav"
+                    record_audio(audio_file, duration=10)
+                    buddy.speaker_sr.enroll_speaker(name, audio_file)
+                    buddy.speaker_sr.save_speakers()
+                    save_memory("name", name)
+                    save_memory("user_name", name)
+                    
+                    buddy.speak(f"Perfect! I've learned your voice, {name}!")
+                    continue
+            
+            # Check if speaker is unknown (only if we have enrolled speakers)
+            if speaker == "Unknown" and buddy.speaker_sr.speaker_embeddings:
+                buddy.speak("I don't recognize your voice. Please say 'My name is' followed by your name.")
+                continue
+            
+            # Process with Buddy AI
             response = ask_buddy(f"Speaker: {speaker}. {text}")
             
             # Extract emotion, intent and reply from AI response
