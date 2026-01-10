@@ -12,6 +12,7 @@ class BuddyState(Enum):
     """System states for the Buddy application"""
     INITIALIZING = "initializing"
     SLEEPING = "sleeping"
+    VOICE_SLEEPING = "voice_sleeping"  # New state for voice-based sleep
     WAKING = "waking"
     ACTIVE = "active"
     PROCESSING = "processing"
@@ -39,7 +40,10 @@ class StateManager:
             self.logger.info(f"State transition: {self.previous_state.value} -> {new_state.value}")
     
     def is_sleeping(self) -> bool:
-        return self._state == BuddyState.SLEEPING
+        return self._state in [BuddyState.SLEEPING, BuddyState.VOICE_SLEEPING]
+    
+    def is_voice_sleeping(self) -> bool:
+        return self._state == BuddyState.VOICE_SLEEPING
     
     def is_active(self) -> bool:
         return self._state == BuddyState.ACTIVE

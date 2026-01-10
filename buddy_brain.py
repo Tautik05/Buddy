@@ -3,6 +3,7 @@ import os
 import json
 import html
 import sys
+import re
 import threading
 from memory import init_db, save_memory, get_memory, get_all_memory, save_conversation, search_conversations
 from smart_memory import intelligent_memory_save
@@ -19,6 +20,9 @@ with open(PROMPT_PATH, "r", encoding="utf-8") as f:
 # Global state for waiting indicator
 processing_state = {'is_processing': False, 'stop_indicator': False}
 
+# Session conversation context (in-memory for immediate context)
+session_context = {'conversations': [], 'max_size': 5}
+
 def show_thinking_indicator():
     """Show animated thinking indicator"""
     indicators = ['🤔 Thinking', '🤔 Thinking.', '🤔 Thinking..', '🤔 Thinking...']
@@ -30,8 +34,8 @@ def show_thinking_indicator():
     if not processing_state['stop_indicator']:
         print('\r' + ' ' * 20 + '\r', end='', flush=True)  # Clear indicator
 
-def build_enhanced_context(user_input, memory_context):
-    """Build enhanced context with memory and conversation history"""
+def build_enhanced_context(user_input, memory_context, user_name=None):
+    """Build enhanced context with memory and recent conversation history"""
     context_parts = []
     
     # Add memory context
@@ -40,19 +44,20 @@ def build_enhanced_context(user_input, memory_context):
         if facts:
             context_parts.append(f"Known facts: {', '.join(facts)}")
     
-    # Search for relevant past conversations from database
-    try:
-        relevant_convs = search_conversations(user_input, limit=3)
-        if relevant_convs:
-            context_parts.append("Recent relevant conversations:")
-            for conv in relevant_convs:
-                user_msg = conv['user_input'][:60] + "..." if len(conv['user_input']) > 60 else conv['user_input']
-                buddy_msg = conv['buddy_reply'][:60] + "..." if len(conv['buddy_reply']) > 60 else conv['buddy_reply']
-                context_parts.append(f"User: {user_msg} | Buddy: {buddy_msg}")
-    except Exception as e:
-        pass  # Skip on error
+    # Add session conversation context (immediate context)
+    if session_context['conversations']:
+        context_parts.append("Recent conversation:")
+        for conv in session_context['conversations'][-3:]:  # Last 3 for immediate context
+            user_msg = conv['user'][:80] + "..." if len(conv['user']) > 80 else conv['user']
+            buddy_msg = conv['buddy'][:80] + "..." if len(conv['buddy']) > 80 else conv['buddy']
+            context_parts.append(f"User: {user_msg} | Buddy: {buddy_msg}")
     
     return "\n".join(context_parts)
+
+def clear_session_context():
+    """Clear session conversation context"""
+    session_context['conversations'].clear()
+    print("DEBUG: Session context cleared")
 
 # Global lock for preventing concurrent processing
 _processing_lock = threading.Lock()
@@ -85,19 +90,19 @@ def ask_buddy(user_input, recognized_user=None):
         indicator_thread = threading.Thread(target=show_thinking_indicator, daemon=True)
         indicator_thread.start()
         # Get current memory context
-        memory_context = get_all_memory()
+        memory_context = get_all_memory(user_name=recognized_user if recognized_user else "Unknown")
         
         # Use recognized_user if provided, otherwise check memory
-        user_name = recognized_user or memory_context.get("name") or memory_context.get("user_name", "")
-        name_known = bool(user_name)
+        effective_user_name = recognized_user or memory_context.get("name") or memory_context.get("user_name", "")
+        name_known = bool(effective_user_name)
         
         # Build enhanced context with memory and conversation history
-        enhanced_context = build_enhanced_context(user_input, memory_context)
+        enhanced_context = build_enhanced_context(user_input, memory_context, effective_user_name)
         
         # Build final context
         context_parts = []
-        if user_name:
-            context_parts.append(f"User name: {user_name}")
+        if effective_user_name:
+            context_parts.append(f"User name: {effective_user_name}")
         if enhanced_context:
             context_parts.append(enhanced_context)
         
@@ -112,27 +117,56 @@ def ask_buddy(user_input, recognized_user=None):
         print(f"DEBUG: Prompt length: {len(prompt)} chars")  # Debug output
 
         try:
-            print(f"DEBUG: Calling ollama with llama3.2:3b...")
+            import requests
             import time
-            ollama_start = time.time()
-            result = subprocess.run(
-                ["ollama", "run", "llama3.2:3b"],
-                input=prompt,
-                text=True,
-                capture_output=True,
-                encoding="utf-8",
-                errors="ignore",
-                timeout=30  # Reduced timeout
+            
+            response = requests.post('http://localhost:11434/api/generate', 
+                json={
+                    'model': 'llama3.2:3b',
+                    'prompt': prompt,
+                    'stream': False,
+                    'options': {
+                        'temperature': 0.3,
+                        'top_p': 0.8,
+                        'num_predict': 80,   # Increased from 50 to avoid cut-off JSON
+                        'num_ctx': 1024
+                    }
+                },
+                timeout=15
             )
-            print(f"DEBUG: Ollama took {time.time() - ollama_start:.2f}s")
-        except subprocess.TimeoutExpired:
-            return "Hey! I'm still thinking... give me a moment to respond."
-        except FileNotFoundError:
-            return "Ollama not found. Please make sure Ollama is installed and running."
-        except Exception as e:
-            return f"Having trouble connecting. Try: 'ollama pull phi3:mini' first."
+            
+            if response.status_code == 200:
+                result_text = response.json()['response'].strip()
+            else:
+                raise Exception(f"Ollama API error: {response.status_code}")
+                
+        except Exception as api_error:
+            # Fallback to subprocess
+            try:
+                result = subprocess.run(
+                    ["ollama", "run", "llama3.2:3b"],
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    timeout=25  # Increased from 20 to 25
+                )
+                result_text = result.stdout.strip()
+            except subprocess.TimeoutExpired:
+                # Better fallback for system instructions
+                if "I just recognized" in user_input and "on camera" in user_input:
+                    # Extract name from system instruction
+                    import re
+                    name_match = re.search(r'I just recognized (\w+) on camera', user_input)
+                    if name_match:
+                        name = name_match.group(1)
+                        return f"Hey {name}! Good to see you!"
+                return "Hey! Good to see you!"
+            except Exception as e:
+                return f"Having trouble connecting. Try: 'ollama pull llama3.2:3b' first."
 
-        response = result.stdout.strip()
+        response = result_text
         
         # Clean up qwen's markdown and verbose responses
         if '```json' in response:
@@ -163,10 +197,15 @@ def ask_buddy(user_input, recognized_user=None):
             
             # Fix missing closing brace if needed
             if json_text.startswith('{') and not json_text.endswith('}'):
-                json_text += '}'
+                # Try to find where JSON was cut off and complete it
+                if '"intent":' in json_text and not json_text.rstrip().endswith('"'):
+                    # JSON was cut off mid-value, try to complete it
+                    json_text = json_text.rstrip().rstrip(',').rstrip('"') + '"conversation"}'
+                else:
+                    json_text += '}'
             
             data = json.loads(json_text)
-            reply = data.get("reply", "")
+            reply = data.get("reply", data.get("response", ""))  # Handle both "reply" and "response" keys
             
             # Fix nested JSON in reply field
             if isinstance(reply, dict):
@@ -180,15 +219,24 @@ def ask_buddy(user_input, recognized_user=None):
             intent = data.get("intent", "unknown")
             
             # Apply system rules
-            reply, intent = _apply_system_rules(user_input, reply, intent, user_name, memory_context)
+            reply, intent = _apply_system_rules(user_input, reply, intent, effective_user_name, memory_context)
             
             # Smart memory extraction and acknowledgment
-            memory_saved = _extract_and_save_memory(user_input, user_name)
+            memory_saved = _extract_and_save_memory(user_input, effective_user_name)
             if memory_saved:
                 reply = f"Got it! I'll remember that {memory_saved}. {reply}"
             
             # Save conversation with original JSON response
-            save_conversation(user_input, response, intent, user_name)
+            save_conversation(user_input, response, intent, effective_user_name)
+            
+            # Add to session context for immediate continuity
+            session_context['conversations'].append({
+                'user': user_input,
+                'buddy': reply
+            })
+            # Keep only last N conversations in memory
+            if len(session_context['conversations']) > session_context['max_size']:
+                session_context['conversations'].pop(0)
             
             print(f"DEBUG: Final reply: '{reply}'")
             return reply
@@ -204,14 +252,14 @@ def ask_buddy(user_input, recognized_user=None):
                     if end > start:
                         reply = response[start:end]
                         # Still apply rules to manually extracted reply
-                        reply, _ = _apply_system_rules(user_input, reply, "unknown", user_name, memory_context)
+                        reply, _ = _apply_system_rules(user_input, reply, "unknown", effective_user_name, memory_context)
                         # Smart memory extraction and acknowledgment
-                        memory_saved = _extract_and_save_memory(user_input, user_name)
+                        memory_saved = _extract_and_save_memory(user_input, effective_user_name)
                         if memory_saved:
                             reply = f"Got it! I'll remember that {memory_saved}. {reply}"
                         
                         # Save conversation with original response
-                        save_conversation(user_input, response, "unknown", user_name)
+                        save_conversation(user_input, response, "unknown", effective_user_name)
                         return reply
                 except:
                     pass
@@ -219,23 +267,41 @@ def ask_buddy(user_input, recognized_user=None):
             # If it's a plain text response, wrap it properly
             if response and not response.startswith('{'):
                 # Apply rules to plain text response
-                reply, intent = _apply_system_rules(user_input, response, "conversation", user_name, memory_context)
+                reply, intent = _apply_system_rules(user_input, response, "conversation", effective_user_name, memory_context)
                 # Smart memory extraction and acknowledgment
-                memory_saved = _extract_and_save_memory(user_input, user_name)
+                memory_saved = _extract_and_save_memory(user_input, effective_user_name)
                 if memory_saved:
                     reply = f"Got it! I'll remember that {memory_saved}. {reply}"
                 
                 # Save conversation
-                save_conversation(user_input, response, intent, user_name)
+                save_conversation(user_input, response, intent, effective_user_name)
+                
+                # Add to session context
+                session_context['conversations'].append({
+                    'user': user_input,
+                    'buddy': reply
+                })
+                if len(session_context['conversations']) > session_context['max_size']:
+                    session_context['conversations'].pop(0)
+                
                 return reply
             
             # Smart memory extraction and acknowledgment
-            memory_saved = _extract_and_save_memory(user_input, user_name)
+            memory_saved = _extract_and_save_memory(user_input, effective_user_name)
             if memory_saved:
                 response = f"Got it! I'll remember that {memory_saved}. {response}"
             
             # Save even unparseable responses
-            save_conversation(user_input, response, "unknown", user_name)
+            save_conversation(user_input, response, "unknown", effective_user_name)
+            
+            # Add to session context
+            session_context['conversations'].append({
+                'user': user_input,
+                'buddy': response
+            })
+            if len(session_context['conversations']) > session_context['max_size']:
+                session_context['conversations'].pop(0)
+            
             return response
     
     except Exception as e:
@@ -251,9 +317,12 @@ def ask_buddy(user_input, recognized_user=None):
 
 
 def _extract_and_save_memory(user_input, user_name):
-    """Extract and save meaningful information from user input"""
+    """Extract and save meaningful information from user input with user-specific keys"""
     import re
     text = user_input.lower()
+    
+    # Use "Unknown" as fallback user_name if None provided
+    effective_user = user_name if user_name else "Unknown"
     
     # Any date patterns (birthdays, anniversaries, etc.)
     date_patterns = [
@@ -274,7 +343,7 @@ def _extract_and_save_memory(user_input, user_name):
                 else:
                     month, day = groups[0], groups[1]
                 birthday = f"{day} {month.capitalize()}"
-                save_memory("birthday", birthday)
+                save_memory("birthday", birthday, user_name=effective_user)
                 return f"your birthday is {birthday}"
     
     # Any personal preferences
@@ -290,7 +359,7 @@ def _extract_and_save_memory(user_input, user_name):
         match = re.search(pattern, text)
         if match:
             value = match.group(1).strip()
-            save_memory(key, value)
+            save_memory(key, value, user_name=effective_user)
             return f"your {key.replace('_', ' ')} is {value}"
     
     # Work/job information
@@ -306,7 +375,7 @@ def _extract_and_save_memory(user_input, user_name):
         match = re.search(pattern, text)
         if match:
             value = match.group(1).strip()
-            save_memory(key, value)
+            save_memory(key, value, user_name=effective_user)
             return f"you {key} as {value}" if key == 'job' else f"you {key} {value}"
     
     # Location information
@@ -320,7 +389,7 @@ def _extract_and_save_memory(user_input, user_name):
         match = re.search(pattern, text)
         if match:
             value = match.group(1).strip()
-            save_memory(key, value)
+            save_memory(key, value, user_name=effective_user)
             return f"you live in {value}" if key == 'location' else f"you are from {value}"
     
     return None
@@ -359,17 +428,30 @@ def _apply_system_rules(user_input, reply, intent, user_name, memory_context):
     
     for memory_key, questions in question_patterns:
         if any(q in user_input.lower() for q in questions):
-            if memory_context and memory_key in memory_context:
+            # Check user-specific memory first
+            effective_user = user_name if user_name else "Unknown"
+            user_memory_value = get_memory(memory_key, effective_user)
+            if user_memory_value:
                 # Let AI response stand if it has the right info
-                if str(memory_context[memory_key]).lower() in reply.lower():
+                if str(user_memory_value).lower() in reply.lower():
                     return reply, intent
                 # Override if memory exists but AI doesn't use it
-                reply = f"Your {memory_key.replace('_', ' ')} is {memory_context[memory_key]}!"
+                reply = f"Your {memory_key.replace('_', ' ')} is {user_memory_value}!"
                 intent = "provide_info"
             elif "don't know" not in reply.lower():
                 reply = "Don't know that about you yet - wanna share?"
                 intent = "ask_personal_info"
             break
+    
+    # Rule: Handle existing user identification properly
+    if any(phrase in user_input.lower() for phrase in ['i am', 'yes i am', 'my name is']):
+        # Extract name from user input
+        name_match = re.search(r'(?:i am|yes i am|my name is)\s+([a-zA-Z]+)', user_input.lower())
+        if name_match:
+            mentioned_name = name_match.group(1).capitalize()
+            # If the AI response already mentions this name correctly, don't override
+            if mentioned_name.lower() in reply.lower():
+                return reply, intent
     
     # Rule: Name handling
     if not user_name and intent == "greeting":
@@ -378,10 +460,12 @@ def _apply_system_rules(user_input, reply, intent, user_name, memory_context):
             intent = "ask_name"
     
     # Rule: Use name only for initial greetings, not every response
+    # Don't add names when user is introducing themselves or in non-greeting contexts
     if (user_name and intent == "greeting" and 
         any(word in user_input.lower() for word in ['hello', 'hi', 'hey', 'good morning', 'good evening']) and
-        user_name.lower() not in reply.lower()):
-        # Only add name if this seems like an initial greeting
+        user_name.lower() not in reply.lower() and
+        not any(intro in user_input.lower() for intro in ['i am', 'my name is', 'call me', 'i\'m'])):
+        # Only add name if this seems like an initial greeting and not an introduction
         reply = f"Hey {user_name}! {reply.replace('Hey!', '').replace('Hey', '').strip()}"
     
     # Rule: Remove wrong name prefixes from responses
@@ -416,10 +500,11 @@ def _apply_system_rules(user_input, reply, intent, user_name, memory_context):
         if reply.endswith(("!", "?", ",")):
             reply = reply[:-1].strip()
     
-    # Rule: Remove name prefixes from non-greeting responses
+    # Rule: Remove name prefixes from non-greeting responses and introductions
     if user_name and f"Hey {user_name}" in reply:
-        # If not a greeting, remove the name prefix
-        if not any(word in user_input.lower() for word in ['hello', 'hi', 'hey', 'good morning', 'good evening']):
+        # If not a greeting or if user is introducing themselves, remove the name prefix
+        if (not any(word in user_input.lower() for word in ['hello', 'hi', 'hey', 'good morning', 'good evening']) or
+            any(intro in user_input.lower() for intro in ['i am', 'my name is', 'call me', 'i\'m'])):
             reply = reply.replace(f"Hey {user_name}, ", "").replace(f"Hey {user_name}! ", "").replace(f"Hey {user_name}", "")
     
     # Rule: Object questions

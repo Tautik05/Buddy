@@ -81,12 +81,20 @@ class FaceRecognizer:
     def add_face(self, name: str, face_img: np.ndarray) -> bool:
         """Add a new face to known faces"""
         try:
+            print(f"DEBUG: add_face called for '{name}' with image shape {face_img.shape}")
             embedding = self.get_embedding(face_img)
+            print(f"DEBUG: Generated embedding shape: {embedding.shape}")
+            
             self.known_faces[name] = embedding
+            print(f"DEBUG: Added to known_faces dict, total faces: {len(self.known_faces)}")
+            
             save_face(name, embedding, 0.95)
+            print(f"DEBUG: Called save_face for '{name}'")
+            
             self.logger.info(f"Added face for user: {name}")
             return True
         except Exception as e:
+            print(f"DEBUG: Exception in add_face: {e}")
             self.logger.error(f"Failed to add face for {name}: {e}", exc_info=True)
             return False
     

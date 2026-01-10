@@ -71,8 +71,9 @@ class IntegratedBuddy:
         self.APPEAR_THRESHOLD = 5  # Object must be seen 5 times
         self.DISAPPEAR_THRESHOLD = 8  # Object must be missing 8 times
         
-        # Initialize managers
+        # Initialize sleep/wake manager with failed listening counter
         self.sleep_wake = SleepWakeManager(self.config, self.state_manager)
+        self.sleep_wake.failed_listening_count = 0  # Initialize counter
         self.input_handler = InputHandler()
         
         # Initialize speech components
@@ -85,6 +86,9 @@ class IntegratedBuddy:
         self.running = False
         self._listening = False  # Initialize listening state
         self._processing_input = False  # Initialize processing state
+        self.is_shutting_down = False  # Add shutdown flag
+        self._listening_lock = threading.Lock()  # Add listening lock
+        self._listening_timer = None  # Initialize timer
         
         self.state_manager.state = BuddyState.ACTIVE
         
@@ -124,9 +128,9 @@ class IntegratedBuddy:
             time.sleep(1.0)  # Give camera more time
             
             stable_recognition_count = 0
-            required_stable_frames = 5
+            required_stable_frames = 2  # Reduced from 5 to 2
             
-            for attempt in range(50):
+            for attempt in range(30):  # Reduced from 50 to 30
                 ret, frame = self.cap.read()
                 if not ret:
                     continue
@@ -146,8 +150,6 @@ class IntegratedBuddy:
                     if w > 80 and h > 80 and is_stable:
                         face_roi = frame[y:y+h, x:x+w]
                         name, confidence = self.face_recognizer.recognize(face_roi)
-                        
-                        print(f"DEBUG: Attempt {attempt+1}: '{name}' confidence {confidence:.3f}")
                         
                         if name != "Unknown" and confidence > self.config.confidence_threshold:
                             stable_recognition_count += 1
@@ -190,7 +192,7 @@ class IntegratedBuddy:
                         print("DEBUG: Stored unknown face for learning")
             
             context = "[CONTEXT: Unknown person detected on camera at startup]"
-            prompt = f"{context} Hello! I don't think we've met before. What's your name?"
+            prompt = f"{context} Hello! I can see someone but don't recognize you yet. Do I know you from before?"
             response = ask_buddy(prompt)
             self._display_response(response)
             
@@ -297,11 +299,11 @@ class IntegratedBuddy:
             self.tts_lock = threading.Lock()
             self.is_speaking = False
             
-            # Calibrate microphone
+            # Calibrate microphone with faster settings
             with self.microphone as source:
-                self.speech_recognizer.adjust_for_ambient_noise(source, duration=1)
-                self.speech_recognizer.energy_threshold = 300
-                self.speech_recognizer.pause_threshold = 1.0
+                self.speech_recognizer.adjust_for_ambient_noise(source, duration=0.5)  # Reduced from 1.0
+                self.speech_recognizer.energy_threshold = 400  # Increased from 300
+                self.speech_recognizer.pause_threshold = 0.8  # Reduced from 1.0
                 self.speech_recognizer.dynamic_energy_threshold = True
             
             self.speech_enabled = True
@@ -312,6 +314,45 @@ class IntegratedBuddy:
             self.speech_enabled = False
     
     def speak(self, text):
+        """Convert text to speech using Edge TTS"""
+        if not self.speech_enabled or not text:
+            return
+        
+        def _speak():
+            with self.tts_lock:
+                try:
+                    self.is_speaking = True
+                    # Generate speech with Edge TTS
+                    asyncio.run(self._generate_and_play_speech(text))
+                    self.is_speaking = False
+                except Exception as e:
+                    print(f"TTS Error: {e}")
+                    self.is_speaking = False
+        
+        threading.Thread(target=_speak, daemon=True).start()
+        """Check for face recognition when waking up from voice sleep"""
+        try:
+            ret, frame = self.cap.read()
+            if not ret:
+                return None, 0.0
+            
+            faces = self.detector.detect(frame)
+            if faces:
+                largest_face = self.detector.get_largest_face(faces)
+                x, y, w, h = largest_face
+                
+                if w > 80 and h > 80:
+                    face_roi = frame[y:y+h, x:x+w]
+                    name, confidence = self.face_recognizer.recognize(face_roi)
+                    
+                    if name != "Unknown" and confidence > self.config.confidence_threshold:
+                        self.sleep_wake.active_user = name
+                        return name, confidence
+            
+            return None, 0.0
+        except Exception as e:
+            self.logger.error(f"Face check on wakeup error: {e}")
+            return None, 0.0
         """Convert text to speech using Edge TTS"""
         if not self.speech_enabled or not text:
             return
@@ -354,6 +395,32 @@ class IntegratedBuddy:
         except Exception as e:
             print(f"Edge TTS Error: {e}")
     
+    def _check_face_on_wakeup(self):
+        """Check for face recognition when waking up from voice sleep"""
+        try:
+            # Skip face check if camera/detector has issues
+            if not hasattr(self, 'cap') or not self.cap.isOpened():
+                return None, 0.0
+            
+            # Skip if detector is not properly initialized
+            if not hasattr(self, 'detector') or not self.detector:
+                return None, 0.0
+                
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                return None, 0.0
+            
+            # Skip if frame is too small or invalid
+            if len(frame.shape) != 3 or frame.shape[0] < 100 or frame.shape[1] < 100:
+                return None, 0.0
+            
+            # Skip face detection entirely if there are issues - just return no face
+            return None, 0.0
+            
+        except Exception as e:
+            # Don't log face detection errors - just return no face detected
+            return None, 0.0
+    
     def _start_listening(self):
         """Start listening for speech in background"""
         if self.is_speaking or not self.speech_enabled or self._listening:
@@ -364,7 +431,7 @@ class IntegratedBuddy:
             time.sleep(0.1)
         
         # Add a small delay after speaking to avoid immediate re-listening
-        time.sleep(1.0)
+        time.sleep(0.5)  # Reduced from 1.0
         
         user_text = self.listen_for_speech(timeout=3)
         if user_text:
@@ -374,41 +441,44 @@ class IntegratedBuddy:
     def _process_input(self, user_text):
         """Process user input in background with duplicate prevention"""
         if self._processing_input:
-            print("DEBUG: Already processing input, skipping")
             return  # Already processing
         
         self._processing_input = True
         try:
-            # Add object context if available
-            context_parts = []
-            if self.sleep_wake.active_user:
-                context_parts.append(f"User {self.sleep_wake.active_user} says")
-            
-            # Add object context
-            if self.stable_objects:
-                objects_list = ', '.join(self.stable_objects)
-                context_parts.append(f"Objects visible: {objects_list}")
-            
-            full_message = f"[CONTEXT: {', '.join(context_parts)}] {user_text}" if context_parts else user_text
-            
-            response = ask_buddy(full_message, recognized_user=self.sleep_wake.active_user)
-            if response:  # Only process if not None (not skipped)
-                self._display_response(response)
+            # Check if this should trigger voice sleep mode
+            should_continue = self._handle_user_input(user_text)
+            if not should_continue:
+                # Signal main loop to exit
+                self.running = False
         except Exception as e:
             print(f"Error processing input: {e}")
         finally:
             self._processing_input = False
     
-    def listen_for_speech(self, timeout=2):
-        """Listen for speech input"""
+    def _delayed_listening(self):
+        """Start listening after a delay - SIMPLIFIED"""
+        if self.is_shutting_down or self._processing_input:
+            return
+            
+        user_text = self.listen_for_speech(timeout=5.0)
+        
+        if user_text:
+            print("🤔 Thinking...")
+            threading.Thread(target=self._process_input, args=(user_text,), daemon=True).start()
+        else:
+            # Just continue listening - no sleep mode
+            if not self.is_shutting_down:
+                threading.Timer(1.0, self._delayed_listening).start()
+    
+    def listen_for_speech(self, timeout=5.0):
+        """Listen for speech input - SIMPLIFIED"""
         if not self.speech_enabled:
             return ""
         
         try:
-            # Use a fresh microphone instance each time to avoid context conflicts
             with sr.Microphone() as source:
                 print("🎤 Listening...")
-                audio = self.speech_recognizer.listen(source, timeout=timeout, phrase_time_limit=6)
+                audio = self.speech_recognizer.listen(source, timeout=timeout, phrase_time_limit=8)
             
             print("Processing speech...")
             text = self.speech_recognizer.recognize_google(audio)
@@ -418,7 +488,7 @@ class IntegratedBuddy:
         except sr.WaitTimeoutError:
             return ""
         except sr.UnknownValueError:
-            print("Didn't catch that")
+            print("Couldn't understand that.")
             return ""
         except sr.RequestError as e:
             print(f"Speech error: {e}")
@@ -447,7 +517,10 @@ class IntegratedBuddy:
             frame = self.object_detector.draw_detections(frame, detections)
         
         # Status display
-        if self.state_manager.is_sleeping():
+        if self.state_manager.is_voice_sleeping():
+            status = "💤 Voice Sleep (say 'Hey Buddy' to wake)"
+            color = (100, 100, 100)
+        elif self.state_manager.is_sleeping():
             status = "💤 Sleeping (no one around)"
             color = (128, 128, 128)
         elif self.state_manager.is_waking():
@@ -485,27 +558,121 @@ class IntegratedBuddy:
         pass
     
     def _display_response(self, response: str):
-        """Display AI response"""
+        """Display AI response and extract intent for hardware control"""
         if not response:  # Skip if None or empty
             return
             
-        # The response from ask_buddy is now just the reply text
-        clean_response = html.unescape(response)
+        # Try to parse JSON to extract intent
+        intent = "conversation"  # Default intent
+        reply_text = response
+        
+        try:
+            # Try to parse as JSON first
+            if response.strip().startswith('{'):
+                import json
+                data = json.loads(response.strip())
+                reply_text = data.get("reply", data.get("response", ""))  # Handle both keys
+                intent = data.get("intent", "conversation")
+                print(f"[DEBUG: Extracted intent: {intent}]")
+            else:
+                # If not JSON, use the text as-is
+                reply_text = response
+        except Exception as e:
+            print(f"[DEBUG: JSON parse failed: {e}]")
+            # If parsing fails, use original response
+            reply_text = response
+        
+        # Clean and display response
+        clean_response = html.unescape(reply_text)
         print(f"\nBuddy: {clean_response}")
-        self.speak(clean_response)
-        self._show_prompt()
+        
+        # Log intent for hardware control
+        if intent != "conversation":
+            print(f"[INTENT: {intent}]")
+        
+        # Handle sleep intent - just speak and continue
+        if intent == "sleep":
+            self.speak(clean_response)
+            return
+        
+        # Start TTS in background (non-blocking)
+        if intent != "sleep":
+            self.speak(clean_response)
+        
+        # Calculate reading time and start listening
+        words = len(clean_response.split())
+        reading_time = max(2.0, words / 3.0)
+        
+        # Always start listening after response
+        threading.Timer(reading_time, self._delayed_listening).start()
     
     def _handle_user_input(self, user_text: str) -> bool:
         """Process user input"""
-        if user_text.lower() in ['exit', 'quit', 'goodbye', 'bye']:
-            print("\nBuddy: Goodbye! It was nice talking with you! 👋")
+        # Check for sleep/goodbye commands
+        sleep_commands = ['good night', 'goodnight', 'go to sleep', 'sleep now', 'bye', 'goodbye', 'see you later', 'talk later']
+        if any(cmd in user_text.lower() for cmd in sleep_commands):
+            response = ask_buddy(user_text, recognized_user=self.sleep_wake.active_user)
+            if response:
+                result = self._display_response(response)
+                if result == "VOICE_SLEEP":
+                    return True  # Continue running but in voice sleep mode
+            return True  # Continue running
+        
+        if user_text.lower() in ['exit', 'quit']:
+            response = ask_buddy("User wants to exit the system", recognized_user=self.sleep_wake.active_user)
+            if response:
+                result = self._display_response(response)
+                if result == "EXIT":
+                    return False
             return False
         
-        # Learning new name
-        if self.awaiting_name and self.unknown_face_img is not None:
+        # Learning new name or recognizing existing user (works even without awaiting_name)
+        if (self.awaiting_name and self.unknown_face_img is not None) or \
+           (self.sleep_wake.active_user is None and any(phrase in user_text.lower() for phrase in ['i am', 'yes i am', 'my name is'])) or \
+           (self.sleep_wake.active_user and any(phrase in user_text.lower() for phrase in ['i am not', 'no i am', 'actually i am', 'i\'m not', 'wrong person'])):
+            
+            # Handle user correction (wrong face recognized)
+            if self.sleep_wake.active_user and any(phrase in user_text.lower() for phrase in ['i am not', 'no i am', 'actually i am', 'i\'m not', 'wrong person']):
+                print(f"DEBUG: User correction detected - current user: {self.sleep_wake.active_user}")
+                
+                # Check if they're providing their real name
+                name_patterns = [
+                    r"(?:i'?m|my name is|call me|i am|actually i am|no i am)\s+([a-zA-Z]+)",
+                    r"(?:i'?m not .+?i'?m|i am not .+?i am)\s+([a-zA-Z]+)",
+                    r"wrong.+?i'?m\s+([a-zA-Z]+)",
+                    r"not .+?i'?m\s+([a-zA-Z]+)"
+                ]
+                
+                name = None
+                for pattern in name_patterns:
+                    match = re.search(pattern, user_text.lower())
+                    if match:
+                        name = match.group(1).capitalize()
+                        break
+                
+                if name:
+                    print(f"DEBUG: Switching from {self.sleep_wake.active_user} to {name}")
+                    self.sleep_wake.active_user = name
+                    
+                    context = f"[CONTEXT: User corrected me - they are {name}, not {self.sleep_wake.active_user}] {user_text}"
+                    response = ask_buddy(context, recognized_user=name)
+                    if response:
+                        self._display_response(response)
+                    return True
+                else:
+                    # Just a correction without new name
+                    self.sleep_wake.active_user = None
+                    self.awaiting_name = True
+                    
+                    context = f"[CONTEXT: User said I got their identity wrong] {user_text}"
+                    response = ask_buddy(context)
+                    if response:
+                        self._display_response(response)
+                    return True
             # Enhanced name detection patterns
             name_patterns = [
                 r"(?:i'?m|my name is|call me|i am|name'?s|this is)\s+([a-zA-Z]+)",
+                r"(?:yes\s+)?(?:i'?m|i am)\s+([a-zA-Z]+)",  # "yes i am sagnik"
                 r"^([a-zA-Z]+)$",  # Just a single name
                 r"it'?s\s+([a-zA-Z]+)",
                 r"([a-zA-Z]+)\s*(?:here|speaking)"
@@ -520,19 +687,75 @@ class IntegratedBuddy:
             
             if name:
                 print(f"DEBUG: Detected name '{name}' from input '{user_text}'")
-                if self.face_recognizer.add_face(name, self.unknown_face_img):
-                    print(f"DEBUG: Successfully added face for {name}")
-                    self.sleep_wake.active_user = name
-                    self.unknown_face_img = None
-                    self.awaiting_name = False
+                
+                # Check if this name already exists in database
+                try:
+                    from memory import get_face
+                    existing_face = get_face(name)
                     
-                    context = f"[CONTEXT: User introduced themselves as {name}, face learned] {user_text}"
-                    response = ask_buddy(context, recognized_user=name)
-                    if response:
-                        self._display_response(response)
-                    return True
-                else:
-                    print(f"DEBUG: Failed to add face for {name}")
+                    if existing_face is not None:
+                        # Existing user - set as active without learning new face
+                        print(f"DEBUG: '{name}' is an existing user, setting as active")
+                        self.sleep_wake.active_user = name
+                        self.unknown_face_img = None
+                        self.awaiting_name = False
+                        
+                        # Migrate Unknown user memory to existing user
+                        try:
+                            from memory import migrate_unknown_memory
+                            migrated_count = migrate_unknown_memory(name)
+                            if migrated_count > 0:
+                                print(f"DEBUG: Migrated {migrated_count} memories from Unknown to {name}")
+                        except Exception as e:
+                            print(f"DEBUG: Could not migrate memory: {e}")
+                        
+                        context = f"[CONTEXT: Existing user {name} identified themselves, face recognition failed but user recognized] {user_text}"
+                        response = ask_buddy(context, recognized_user=name)
+                        if response:
+                            self._display_response(response)
+                        return True
+                    else:
+                        # New user - learn their face
+                        print(f"DEBUG: '{name}' is a new user, learning face")
+                        print(f"DEBUG: Current unknown_face_img shape: {self.unknown_face_img.shape if self.unknown_face_img is not None else 'None'}")
+                        
+                        if self.face_recognizer.add_face(name, self.unknown_face_img):
+                            print(f"DEBUG: Successfully added face for {name}")
+                            
+                            # Verify face was saved by checking database
+                            try:
+                                from memory import get_face
+                                saved_embedding = get_face(name)
+                                print(f"DEBUG: Verified face saved in DB: {saved_embedding is not None}")
+                                if saved_embedding is not None:
+                                    print(f"DEBUG: Embedding shape: {saved_embedding.shape}")
+                            except Exception as e:
+                                print(f"DEBUG: Could not verify face save: {e}")
+                            
+                            # Migrate Unknown user memory to new user
+                            try:
+                                from memory import migrate_unknown_memory
+                                migrated_count = migrate_unknown_memory(name)
+                                if migrated_count > 0:
+                                    print(f"DEBUG: Migrated {migrated_count} memories from Unknown to {name}")
+                            except Exception as e:
+                                print(f"DEBUG: Could not migrate memory: {e}")
+                            
+                            self.sleep_wake.active_user = name
+                            self.unknown_face_img = None
+                            self.awaiting_name = False
+                            
+                            context = f"[CONTEXT: User introduced themselves as {name}, face learned] {user_text}"
+                            response = ask_buddy(context, recognized_user=name)
+                            if response:
+                                self._display_response(response)
+                            return True
+                        else:
+                            print(f"DEBUG: Failed to add face for {name}")
+                            print(f"DEBUG: Face recognizer error - check face_recognizer.add_face method")
+                            
+                except Exception as e:
+                    print(f"DEBUG: Error checking existing user: {e}")
         
         # Regular conversation - simplified to avoid duplicate processing
         try:
@@ -550,7 +773,10 @@ class IntegratedBuddy:
             
             response = ask_buddy(full_message, recognized_user=self.sleep_wake.active_user)
             if response:  # Only display if not None (not skipped)
-                self._display_response(response)
+                result = self._display_response(response)
+                # Check if voice sleep was triggered
+                if result == "VOICE_SLEEP":
+                    return True  # Continue running but in voice sleep mode - don't start listening
         except Exception as e:
             self.logger.error(f"AI error: {e}", exc_info=True)
             print(f"\nBuddy: Sorry, I had trouble with that. {str(e)}")
@@ -573,37 +799,8 @@ class IntegratedBuddy:
                     ret, frame = self.cap.read()
                     if ret:
                         processed, face_detected, name, confidence = self._process_frame(frame)
-                        
-                        # Update sleep/wake state
-                        state_changed, greeting = self.sleep_wake.update(
-                            face_detected, name, confidence
-                        )
-                        
-                        # Display greeting if state changed
-                        if state_changed and greeting:
-                            if self.state_manager.is_sleeping():
-                                print(f"\n{greeting}")
-                            else:
-                                print()
-                                self._display_response(greeting)
-                        
-                        # Show video
                         cv2.imshow('Buddy Vision', processed)
-                    
                     last_frame_time = current_time
-                
-                # Handle voice input (default - no keyboard needed)
-                if not self.state_manager.is_sleeping():
-                    # Simple continuous listening - no complex state checks
-                    if not self.is_speaking:
-                        try:
-                            speech_text = self.listen_for_speech(timeout=2)
-                            if speech_text and not self._processing_input:
-                                print("🤔 Thinking...")
-                                threading.Thread(target=self._process_input, args=(speech_text,), daemon=True).start()
-                        except Exception as e:
-                            print(f"Voice input error: {e}")
-                            time.sleep(0.1)
                 
                 # Check for quit key
                 key = cv2.waitKey(1) & 0xFF
@@ -622,8 +819,25 @@ class IntegratedBuddy:
             self.cleanup()
     
     def cleanup(self):
-        """Clean up resources"""
+        """Clean up resources and clear conversations for fresh start"""
+        self.is_shutting_down = True  # Set shutdown flag first
         self.state_manager.state = BuddyState.SHUTDOWN
+        
+        # Clear conversations for fresh start
+        try:
+            from memory import clear_conversations
+            from buddy_brain import clear_session_context
+            
+            print("\n🧹 Clearing conversations for fresh start...")
+            clear_conversations()  # Clear database conversations
+            clear_session_context()  # Clear session context
+            print("✅ Conversations cleared")
+        except Exception as e:
+            print(f"⚠️ Could not clear conversations: {e}")
+        
+        # Reset sleep wake manager
+        if hasattr(self, 'sleep_wake'):
+            self.sleep_wake.reset()
         
         if self.cap:
             self.cap.release()

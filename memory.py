@@ -145,11 +145,17 @@ def migrate_database(cur, conn):
 
 # ------------------ MEMORY OPERATIONS ------------------
 
-def save_memory(key, value, confidence=1.0):
+def save_memory(key, value, confidence=1.0, user_name=None):
     """
-    Store or update memory.
+    Store or update memory with user-specific keys.
     Value is stored as JSON string for flexibility.
     """
+    # Create user-specific key if user_name provided
+    if user_name:
+        memory_key = f"{user_name}_{key}"
+    else:
+        memory_key = key
+    
     try:
         value_str = json.dumps(value)
     except Exception:
@@ -165,14 +171,31 @@ def save_memory(key, value, confidence=1.0):
                     value = EXCLUDED.value,
                     confidence = EXCLUDED.confidence,
                     last_updated = NOW()
-            """, (key, value_str, confidence))
+            """, (memory_key, value_str, confidence))
             conn.commit()
 
-def get_memory(key):
+def get_memory(key, user_name=None):
     """
-    Fetch a single memory item.
+    Fetch a single memory item with user-specific support.
     Returns Python object or None.
     """
+    # Try user-specific key first if user_name provided
+    if user_name:
+        memory_key = f"{user_name}_{key}"
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT value FROM memory WHERE key = %s",
+                    (memory_key,)
+                )
+                row = cur.fetchone()
+                if row:
+                    try:
+                        return json.loads(row[0])
+                    except Exception:
+                        return row[0]
+    
+    # Fallback to generic key
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -188,34 +211,49 @@ def get_memory(key):
             except Exception:
                 return row[0]
 
-def get_all_memory(min_confidence=0.0):
+def get_all_memory(min_confidence=0.0, user_name=None):
     """
-    Fetch all memory items above confidence threshold.
+    Fetch all memory items above confidence threshold with user-specific support.
     Returns dict with better error handling.
     """
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT key, value, confidence, last_updated
-                    FROM memory
-                    WHERE confidence >= %s
-                    ORDER BY last_updated DESC
-                """, (min_confidence,))
+                if user_name:
+                    # Get user-specific memories
+                    cur.execute("""
+                        SELECT key, value, confidence, last_updated
+                        FROM memory
+                        WHERE confidence >= %s AND key LIKE %s
+                        ORDER BY last_updated DESC
+                    """, (min_confidence, f"{user_name}_%"))
+                else:
+                    # Get all memories
+                    cur.execute("""
+                        SELECT key, value, confidence, last_updated
+                        FROM memory
+                        WHERE confidence >= %s
+                        ORDER BY last_updated DESC
+                    """, (min_confidence,))
                 rows = cur.fetchall()
 
         memory = {}
         for row in rows:
             try:
+                # Remove user prefix from key for display
+                display_key = row["key"]
+                if user_name and display_key.startswith(f"{user_name}_"):
+                    display_key = display_key[len(f"{user_name}_"):]
+                
                 # Try to parse as JSON first
                 parsed_value = json.loads(row["value"])
-                memory[row["key"]] = parsed_value
+                memory[display_key] = parsed_value
             except (json.JSONDecodeError, TypeError):
                 # If not JSON, store as string
-                memory[row["key"]] = row["value"]
+                memory[display_key] = row["value"]
             except Exception as e:
                 logging.warning(f"Error parsing memory value for key '{row['key']}': {e}")
-                memory[row["key"]] = row["value"]
+                memory[display_key] = row["value"]
 
         return memory
     except Exception as e:
@@ -422,18 +460,59 @@ def search_conversations(query, limit=5):
 
 def get_recent_conversations(limit=10):
     """
-    Get recent conversations for context.
+    Get recent conversations for context with adaptive column mapping.
     """
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT user_input, buddy_reply, intent, created_at
-                FROM conversations
-                ORDER BY created_at DESC
-                LIMIT %s
-            """, (limit,))
+    try:
+        with get_db() as conn:
+            # Check what columns exist
+            with conn.cursor() as schema_cur:
+                schema_cur.execute("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'conversations'
+                    ORDER BY ordinal_position
+                """)
+                columns = [row[0] for row in schema_cur.fetchall()]
+                
+                if not columns:
+                    return []
             
-            return [dict(row) for row in cur.fetchall()]
+            # Use RealDictCursor for data queries
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Adaptive query based on available columns
+                if 'buddy_reply' in columns and 'created_at' in columns:
+                    cur.execute("""
+                        SELECT user_input, buddy_reply, intent, created_at
+                        FROM conversations
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    """, (limit,))
+                elif 'ai_response' in columns and 'timestamp' in columns:
+                    cur.execute("""
+                        SELECT user_input, ai_response as buddy_reply, intent, timestamp as created_at
+                        FROM conversations
+                        ORDER BY timestamp DESC
+                        LIMIT %s
+                    """, (limit,))
+                elif 'buddy_reply' in columns and 'timestamp' in columns:
+                    cur.execute("""
+                        SELECT user_input, buddy_reply, intent, timestamp as created_at
+                        FROM conversations
+                        ORDER BY timestamp DESC
+                        LIMIT %s
+                    """, (limit,))
+                else:
+                    # Fallback to basic query
+                    cur.execute("""
+                        SELECT user_input, created_at
+                        FROM conversations
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    """, (limit,))
+                
+                return [dict(row) for row in cur.fetchall()]
+    except Exception as e:
+        logging.warning(f"Get recent conversations failed: {str(e)}")
+        return []
 
 def update_face_name(old_name, new_name):
     """
@@ -447,3 +526,64 @@ def update_face_name(old_name, new_name):
             )
             conn.commit()
             return cur.rowcount > 0
+
+def clear_conversations():
+    """
+    Clear all conversations from database to keep it light and spacious.
+    Called on sleep/shutdown for fresh start.
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM conversations")
+                conn.commit()
+                logging.info("Cleared all conversations from database")
+                return True
+    except Exception as e:
+        logging.error(f"Failed to clear conversations: {e}")
+        return False
+
+def migrate_unknown_memory(new_user_name):
+    """
+    Migrate memory from Unknown user to newly recognized user.
+    Called when face recognition learns a new name.
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Find all Unknown user memories
+                cur.execute(
+                    "SELECT key, value, confidence FROM memory WHERE key LIKE %s",
+                    ("Unknown_%",)
+                )
+                unknown_memories = cur.fetchall()
+                
+                if unknown_memories:
+                    # Migrate each memory to the new user
+                    for key, value, confidence in unknown_memories:
+                        # Extract the memory type (remove "Unknown_" prefix)
+                        memory_type = key[8:]  # Remove "Unknown_" (8 chars)
+                        new_key = f"{new_user_name}_{memory_type}"
+                        
+                        # Insert with new user key
+                        cur.execute("""
+                            INSERT INTO memory (key, value, confidence, last_updated)
+                            VALUES (%s, %s, %s, NOW())
+                            ON CONFLICT (key)
+                            DO UPDATE SET
+                                value = EXCLUDED.value,
+                                confidence = EXCLUDED.confidence,
+                                last_updated = NOW()
+                        """, (new_key, value, confidence))
+                    
+                    # Delete old Unknown memories
+                    cur.execute("DELETE FROM memory WHERE key LIKE %s", ("Unknown_%",))
+                    conn.commit()
+                    
+                    logging.info(f"Migrated {len(unknown_memories)} memories from Unknown to {new_user_name}")
+                    return len(unknown_memories)
+                    
+        return 0
+    except Exception as e:
+        logging.error(f"Failed to migrate unknown memory: {e}")
+        return 0

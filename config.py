@@ -25,26 +25,32 @@ class Config:
     camera_buffer_size: int = 1
     
     # Recognition thresholds
-    recognition_threshold: float = 0.55  # Increased to handle face variations
-    confidence_threshold: float = 0.4   # Lowered confidence requirement
-    min_face_size: Tuple[int, int] = (50, 50)
+    recognition_threshold: float = 0.5   # Even more forgiving for varying lighting/angles
+    confidence_threshold: float = 0.1   # Very low confidence requirement
+    min_face_size: Tuple[int, int] = (40, 40)  # Smaller minimum size
     max_face_size: Tuple[int, int] = (600, 600)
     
     # Timing settings
-    recognition_interval: float = 2.0
+    recognition_interval: float = 0.8  # Even faster recognition attempts
     sleep_threshold: int = 30  # Frames before going to sleep
-    wake_delay: float = 1.0  # Delay before greeting on wake
-    frame_process_interval: float = 0.1
+    wake_delay: float = 0.3  # Even faster wake response
+    frame_process_interval: float = 0.06  # Faster frame processing
+    voice_sleep_timeout: float = 3.5  # Increased from 2.5 to 3.5
     
     # Motion detection
-    motion_threshold: int = 30  # More lenient
-    stability_frames: int = 3   # Fewer frames needed
-    face_history_size: int = 10
+    motion_threshold: int = 80  # Much more lenient movement tolerance
+    stability_frames: int = 1   # Only 1 frame needed for stability
+    face_history_size: int = 3  # Smaller history for faster response
     
     # Sleep/Wake settings
     enable_sleep_mode: bool = True
     sleep_message: str = "💤 Going to sleep... No one around."
     wake_message: str = "👀 Someone's here!"
+    
+    # Voice-based sleep/wake settings
+    max_listening_attempts: int = 4  # Increased from 3 to 4
+    wake_word: str = "hey buddy"
+    voice_sleep_message: str = "💤 Going to sleep... Say 'Hey Buddy' to wake me up."
     
     # Logging
     log_level: str = "WARNING"  # Changed from INFO to WARNING
