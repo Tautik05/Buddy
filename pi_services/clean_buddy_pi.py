@@ -56,11 +56,16 @@ class BuddyPi:
         # Application state
         self.last_recognition_time = 0
         self.last_object_detection_time = 0
-        self.last_object_clear_time = time.time()  # Clear objects periodically
+        self.last_object_clear_time = time.time()
         self.current_detections = []
         self.running = False
         self.is_speaking = False
         self.active_user = None
+        
+        # Face recognition robustness
+        self.recognition_attempts = {}
+        self.max_attempts = 5
+        self.recognition_threshold = 0.4
         
         print("🤖 Buddy Pi Hardware Ready")
         
@@ -112,12 +117,14 @@ class BuddyPi:
             self.speech_enabled = False
     
     def _startup_greeting(self):
-        """Detect and greet person on startup"""
+        """Detect and greet person on startup with robust recognition"""
         try:
             print("Starting camera and face recognition...")
             time.sleep(1.0)
             
-            for attempt in range(30):
+            recognition_attempts = {}
+            
+            for attempt in range(50):  # More attempts
                 ret, frame = self.cap.read()
                 if not ret:
                     continue
@@ -137,25 +144,28 @@ class BuddyPi:
                         face_roi = frame[y:y+h, x:x+w]
                         name, confidence = self.face_recognizer.recognize(face_roi)
                         
-                        # Only print recognition results during startup, not continuously
-                        if attempt < 5:  # Only first few attempts
-                            pass  # Remove debug spam
+                        if name != "Unknown" and confidence > self.recognition_threshold:
+                            # Track recognition attempts
+                            if name not in recognition_attempts:
+                                recognition_attempts[name] = 0
+                            recognition_attempts[name] += 1
+                            
+                            # Confirm recognition after multiple attempts
+                            if recognition_attempts[name] >= 3:
+                                self.active_user = name
+                                print(f"✅ Confirmed recognition: {name}")
+                                
+                                response = self._call_brain_service(
+                                    f"I just recognized {name} on camera. Greet them warmly.",
+                                    recognized_user=name
+                                )
+                                self._display_response(response)
+                                return
                         
-                        if name != "Unknown" and confidence > 0.3:
-                            self.active_user = name
-                            print(f"Recognized {name} successfully!")
-                            
-                            response = self._call_brain_service(
-                                f"I just recognized {name} on camera. Greet them warmly and use any information you know about them.",
-                                recognized_user=name
-                            )
-                            self._display_response(response)
-                            return
-                        elif name == "Unknown":
-                            # Handle unknown user case
-                            self.active_user = None
-                            print("Unknown person detected")
-                            
+                        # Check if we've tried enough times for unknown person
+                        total_attempts = sum(recognition_attempts.values())
+                        if total_attempts >= self.max_attempts and not self.active_user:
+                            print("❓ Unknown person after multiple attempts")
                             response = self._call_brain_service(
                                 "I can see someone but don't recognize them. Greet them politely and ask their name.",
                                 recognized_user=None
@@ -165,9 +175,9 @@ class BuddyPi:
                 
                 time.sleep(0.1)
             
-            # No face recognized
-            print("No face recognized, starting general interaction")
-            response = self._call_brain_service("Hello! I can see someone but don't recognize you yet.")
+            # Fallback greeting
+            print("Starting general interaction")
+            response = self._call_brain_service("Hello! I'm ready to chat!")
             self._display_response(response)
             
         except Exception as e:
@@ -230,11 +240,17 @@ class BuddyPi:
                     name, confidence = self.face_recognizer.recognize(face_roi)
                     
                     # Update active user if face is recognized during conversation
-                    if name != "Unknown" and confidence > 0.3:
+                    if name != "Unknown" and confidence > self.recognition_threshold:
                         if self.active_user != name:
                             self.active_user = name
-                            print(f"Updated active user to: {name}")
-                        print(f"Recognition: {name} ({confidence:.0%})")
+                        # Reduce recognition spam - only show every 10th recognition
+                        if hasattr(self, 'recognition_count'):
+                            self.recognition_count += 1
+                        else:
+                            self.recognition_count = 1
+                        
+                        if self.recognition_count % 10 == 0:
+                            print(f"Recognition: {name} ({confidence:.0%})")
                     
                     self.last_recognition_time = current_time
         else:
@@ -257,7 +273,7 @@ class BuddyPi:
         return processed, face_detected, name, confidence
     
     def _process_objects(self, frame):
-        """Process object detection with stability tracking"""
+        """Process object detection with minimal debug"""
         try:
             detections = self.object_detector.detect(frame)
             if detections:
@@ -367,21 +383,10 @@ class BuddyPi:
             return ""
     
     def _draw_visualization(self, frame, faces, name=None, confidence=0.0, detections=None):
-        """Draw UI overlays"""
-        # Draw object detection boxes first
+        """Draw UI overlays with object detection boxes"""
+        # Draw object detection boxes FIRST (so they appear behind face boxes)
         if detections:
-            for detection in detections:
-                x1, y1, x2, y2 = map(int, detection['bbox'])
-                obj_name = detection['name']
-                obj_conf = detection['confidence']
-                
-                # Object bounding box
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                
-                # Object label
-                label = f"{obj_name} ({obj_conf:.2f})"
-                cv2.putText(frame, label, (x1, y1-10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            frame = self.object_detector.draw_detections(frame, detections)
         
         # Draw face detection
         for (x, y, w, h) in faces:
@@ -404,6 +409,7 @@ class BuddyPi:
         cv2.putText(frame, status, (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         
+        # Show detected objects in text
         if self.persistent_objects:
             objects_text = f"Objects: {', '.join(list(self.persistent_objects)[:3])}"
             cv2.putText(frame, objects_text, (10, 60), 
