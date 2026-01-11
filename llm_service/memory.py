@@ -368,7 +368,7 @@ def save_conversation(user_input, buddy_reply, intent="unknown", user_name=None)
     """
     try:
         with get_db() as conn:
-            with conn.cursor() as cur:  # Use regular cursor for schema queries
+            with conn.cursor() as cur:
                 # Check what columns exist
                 cur.execute("""
                     SELECT column_name FROM information_schema.columns 
@@ -379,26 +379,29 @@ def save_conversation(user_input, buddy_reply, intent="unknown", user_name=None)
                 if not columns:
                     return
                 
-                # Since both ai_response and buddy_reply exist, populate both
+                # Determine which timestamp column to use
+                timestamp_col = 'created_at' if 'created_at' in columns else 'timestamp'
+                
+                # Since both ai_response and buddy_reply might exist, populate both
                 if 'ai_response' in columns and 'buddy_reply' in columns:
-                    cur.execute("""
-                        INSERT INTO conversations (user_input, ai_response, buddy_reply, intent, user_name, timestamp)
+                    cur.execute(f"""
+                        INSERT INTO conversations (user_input, ai_response, buddy_reply, intent, user_name, {timestamp_col})
                         VALUES (%s, %s, %s, %s, %s, NOW())
                     """, (user_input, buddy_reply, buddy_reply, intent, user_name))
                 elif 'ai_response' in columns:
-                    cur.execute("""
-                        INSERT INTO conversations (user_input, ai_response, intent, user_name, timestamp)
+                    cur.execute(f"""
+                        INSERT INTO conversations (user_input, ai_response, intent, user_name, {timestamp_col})
                         VALUES (%s, %s, %s, %s, NOW())
                     """, (user_input, buddy_reply, intent, user_name))
                 elif 'buddy_reply' in columns:
-                    cur.execute("""
-                        INSERT INTO conversations (user_input, buddy_reply, intent, user_name, timestamp)
+                    cur.execute(f"""
+                        INSERT INTO conversations (user_input, buddy_reply, intent, user_name, {timestamp_col})
                         VALUES (%s, %s, %s, %s, NOW())
                     """, (user_input, buddy_reply, intent, user_name))
                 else:
                     # Minimal insert
-                    cur.execute("""
-                        INSERT INTO conversations (user_input, timestamp)
+                    cur.execute(f"""
+                        INSERT INTO conversations (user_input, {timestamp_col})
                         VALUES (%s, NOW())
                     """, (user_input,))
                 
@@ -429,25 +432,37 @@ def search_conversations(query, limit=5):
                 if not columns:
                     return []
             
+            # Determine timestamp column
+            timestamp_col = 'created_at' if 'created_at' in columns else 'timestamp'
+            
             # Use RealDictCursor for data queries
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Use ai_response since it exists
-                if 'ai_response' in columns:
-                    cur.execute("""
+                # Use ai_response or buddy_reply, whichever exists
+                if 'buddy_reply' in columns:
+                    cur.execute(f"""
+                        SELECT user_input, buddy_reply, 
+                               intent, {timestamp_col} as created_at
+                        FROM conversations
+                        WHERE user_input ILIKE %s OR buddy_reply ILIKE %s
+                        ORDER BY {timestamp_col} DESC
+                        LIMIT %s
+                    """, (f"%{query}%", f"%{query}%", limit))
+                elif 'ai_response' in columns:
+                    cur.execute(f"""
                         SELECT user_input, ai_response as buddy_reply, 
-                               intent, timestamp as created_at
+                               intent, {timestamp_col} as created_at
                         FROM conversations
                         WHERE user_input ILIKE %s OR ai_response ILIKE %s
-                        ORDER BY timestamp DESC
+                        ORDER BY {timestamp_col} DESC
                         LIMIT %s
                     """, (f"%{query}%", f"%{query}%", limit))
                 else:
                     # Search only user input
-                    cur.execute("""
-                        SELECT user_input, timestamp as created_at
+                    cur.execute(f"""
+                        SELECT user_input, {timestamp_col} as created_at
                         FROM conversations
                         WHERE user_input ILIKE %s
-                        ORDER BY timestamp DESC
+                        ORDER BY {timestamp_col} DESC
                         LIMIT %s
                     """, (f"%{query}%", limit))
                 
@@ -458,9 +473,10 @@ def search_conversations(query, limit=5):
         logging.warning(f"Conversation search failed: {str(e)}")
         return []
 
-def get_recent_conversations(limit=10):
+def get_recent_conversations(user_name=None, limit=10):
     """
     Get recent conversations for context with adaptive column mapping.
+    NOW SUPPORTS user_name FILTERING!
     """
     try:
         with get_db() as conn:
@@ -476,40 +492,46 @@ def get_recent_conversations(limit=10):
                 if not columns:
                     return []
             
+            # Determine which columns are available
+            timestamp_col = 'created_at' if 'created_at' in columns else 'timestamp'
+            reply_col = 'buddy_reply' if 'buddy_reply' in columns else 'ai_response'
+            
             # Use RealDictCursor for data queries
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Adaptive query based on available columns
-                if 'buddy_reply' in columns and 'created_at' in columns:
-                    cur.execute("""
-                        SELECT user_input, buddy_reply, intent, created_at
+                # Build query based on available columns and user filter
+                if user_name:
+                    # Filter by user_name if provided
+                    query = f"""
+                        SELECT user_input, {reply_col} as buddy_reply, intent, {timestamp_col} as created_at
                         FROM conversations
-                        ORDER BY created_at DESC
+                        WHERE user_name = %s
+                        ORDER BY {timestamp_col} DESC
                         LIMIT %s
-                    """, (limit,))
-                elif 'ai_response' in columns and 'timestamp' in columns:
-                    cur.execute("""
-                        SELECT user_input, ai_response as buddy_reply, intent, timestamp as created_at
-                        FROM conversations
-                        ORDER BY timestamp DESC
-                        LIMIT %s
-                    """, (limit,))
-                elif 'buddy_reply' in columns and 'timestamp' in columns:
-                    cur.execute("""
-                        SELECT user_input, buddy_reply, intent, timestamp as created_at
-                        FROM conversations
-                        ORDER BY timestamp DESC
-                        LIMIT %s
-                    """, (limit,))
+                    """
+                    cur.execute(query, (user_name, limit))
                 else:
-                    # Fallback to basic query
-                    cur.execute("""
-                        SELECT user_input, created_at
+                    # Get all conversations
+                    query = f"""
+                        SELECT user_input, {reply_col} as buddy_reply, intent, {timestamp_col} as created_at
                         FROM conversations
-                        ORDER BY created_at DESC
+                        ORDER BY {timestamp_col} DESC
                         LIMIT %s
-                    """, (limit,))
+                    """
+                    cur.execute(query, (limit,))
                 
-                return [dict(row) for row in cur.fetchall()]
+                rows = cur.fetchall()
+                
+                # Format results for brain service
+                formatted = []
+                for row in rows:
+                    formatted.append({
+                        'user': row.get('user_input', ''),
+                        'buddy': row.get('buddy_reply', ''),
+                        'intent': row.get('intent', 'unknown')
+                    })
+                
+                return formatted
+                
     except Exception as e:
         logging.warning(f"Get recent conversations failed: {str(e)}")
         return []

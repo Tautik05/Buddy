@@ -45,10 +45,12 @@ class BuddyPi:
         self.face_recognizer = FaceRecognizer(self.config.model_path, self.config)
         self.stability = StabilityTracker(self.config)
         
-        # Initialize object detection
-        self.object_detector = ObjectDetector(confidence_threshold=0.6)  # Lower threshold
+        # Initialize object detection with debug
+        print(f"🔍 Initializing object detection...")
+        self.object_detector = ObjectDetector(confidence_threshold=0.5)  # Slightly higher threshold
         self.stable_objects = set()
         self.persistent_objects = set()  # Keep objects longer
+        print(f"✅ Object detection ready with threshold: 0.5")
         
         # Initialize speech
         self._init_speech()
@@ -153,10 +155,10 @@ class BuddyPi:
                             # Confirm recognition after multiple attempts
                             if recognition_attempts[name] >= 3:
                                 self.active_user = name
-                                print(f"✅ Confirmed recognition: {name}")
+                                print(f"✅ Recognized: {name}")
                                 
                                 response = self._call_brain_service(
-                                    f"I just recognized {name} on camera. Greet them warmly.",
+                                    "Hello! Nice to see you!",
                                     recognized_user=name
                                 )
                                 self._display_response(response)
@@ -187,8 +189,35 @@ class BuddyPi:
     def _call_brain_service(self, user_input: str, recognized_user: Optional[str] = None) -> dict:
         """Call remote brain service"""
         try:
-            # Get current objects - use persistent objects for better continuity
-            objects = list(self.persistent_objects) if self.persistent_objects else list(self.stable_objects)
+            # Force face recognition only for identity-related questions (not general knowledge)
+            user_lower = user_input.lower()
+            identity_patterns = [
+                'who am i', 'who is this', 'who is here', 'who do you see',
+                'recognize me', 'recognize this', 'can you see me', 'do you know me',
+                'identify me', 'identify this', 'scan face', 'scan me'
+            ]
+            if any(pattern in user_lower for pattern in identity_patterns):
+                recognized_user = self._force_face_recognition()
+                if recognized_user:
+                    print(f"🔍 Forced recognition: {recognized_user}")
+            
+            # Force fresh object detection if user is asking about objects
+            objects = []
+            if any(phrase in user_input.lower() for phrase in 
+                  ['what is', 'what do you see', 'in my hand', 'holding', 'show you']):
+                # Get fresh object detection immediately
+                ret, frame = self.cap.read()
+                if ret:
+                    fresh_detections = self.object_detector.detect(frame)
+                    if fresh_detections:
+                        objects = [det['name'] for det in fresh_detections]
+                        # Update persistent objects too
+                        self.persistent_objects.update(objects)
+                        print(f"🔄 Fresh detection: {objects}")
+            
+            # Fallback to cached objects if no fresh detection
+            if not objects:
+                objects = list(self.persistent_objects) if self.persistent_objects else list(self.stable_objects)
             
             # Prepare request
             request_data = {
@@ -218,9 +247,65 @@ class BuddyPi:
                 "raw_response": ""
             }
     
+    def _force_face_recognition(self) -> Optional[str]:
+        """Force immediate face recognition, can handle multiple faces"""
+        try:
+            ret, frame = self.cap.read()
+            if not ret:
+                return None
+            
+            # Add error handling for face detection
+            try:
+                faces = self.detector.detect(frame)
+            except cv2.error as e:
+                print(f"Face detection error: {e}")
+                return None
+            except Exception as e:
+                print(f"Face detection error: {e}")
+                return None
+            
+            if not faces:
+                return None
+            
+            recognized_names = []
+            
+            # Process all faces in frame
+            for (x, y, w, h) in faces:
+                if w > 80 and h > 80:  # Minimum face size
+                    try:
+                        face_roi = frame[y:y+h, x:x+w]
+                        name, confidence = self.face_recognizer.recognize(face_roi)
+                        
+                        if name != "Unknown" and confidence > self.recognition_threshold:
+                            recognized_names.append(name)
+                            print(f"✅ Recognized: {name} (confidence: {confidence:.2f})")
+                    except Exception as e:
+                        print(f"Face recognition error: {e}")
+                        continue
+            
+            # Update active user to the first recognized person
+            if recognized_names:
+                self.active_user = recognized_names[0]
+                if len(recognized_names) == 1:
+                    return recognized_names[0]
+                else:
+                    # Multiple people detected
+                    names_str = ", ".join(recognized_names)
+                    print(f"👥 Multiple people: {names_str}")
+                    return recognized_names[0]  # Return primary user
+            
+            return None
+            
+        except Exception as e:
+            print(f"Force recognition error: {e}")
+            return None
     def _process_frame(self, frame: np.ndarray) -> tuple[np.ndarray, bool, Optional[str], float]:
         """Process frame for face detection and recognition"""
-        faces = self.detector.detect(frame)
+        try:
+            faces = self.detector.detect(frame)
+        except (cv2.error, Exception) as e:
+            print(f"Face detection error: {e}")
+            faces = []
         
         name = None
         confidence = 0.0
@@ -232,7 +317,7 @@ class BuddyPi:
             
             current_time = time.time()
             if (is_stable and 
-                (current_time - self.last_recognition_time) > self.config.recognition_interval):
+                (current_time - self.last_recognition_time) > 30.0):  # 30 second intervals
                 
                 x, y, w, h = largest_face
                 if w > self.config.min_face_size[0] and h > self.config.min_face_size[1]:
@@ -243,27 +328,21 @@ class BuddyPi:
                     if name != "Unknown" and confidence > self.recognition_threshold:
                         if self.active_user != name:
                             self.active_user = name
-                        # Reduce recognition spam - only show every 10th recognition
-                        if hasattr(self, 'recognition_count'):
-                            self.recognition_count += 1
-                        else:
-                            self.recognition_count = 1
-                        
-                        if self.recognition_count % 10 == 0:
-                            print(f"Recognition: {name} ({confidence:.0%})")
+                        # Silent recognition - no console spam
                     
                     self.last_recognition_time = current_time
         else:
             self.stability.reset()
         
-        # Process object detection less frequently for better performance
+        # Process object detection more frequently for better responsiveness
         current_time = time.time()
-        if (current_time - self.last_object_detection_time) > 5.0:  # Every 5 seconds
+        if (current_time - self.last_object_detection_time) > 2.0:  # Every 2 seconds instead of 5
             self.current_detections = self._process_objects(frame)
             self.last_object_detection_time = current_time
         
-        # Clear persistent objects every 30 seconds
-        if (current_time - self.last_object_clear_time) > 30.0:
+        # Clear persistent objects every 60 seconds (longer retention)
+        if (current_time - self.last_object_clear_time) > 60.0:
+            print(f"🧹 Clearing old objects: {self.persistent_objects}")
             self.persistent_objects.clear()
             self.last_object_clear_time = current_time
         
@@ -273,18 +352,25 @@ class BuddyPi:
         return processed, face_detected, name, confidence
     
     def _process_objects(self, frame):
-        """Process object detection with minimal debug"""
+        """Process object detection with debug output"""
         try:
             detections = self.object_detector.detect(frame)
             if detections:
                 current_objects = set([det['name'] for det in detections])
+                confidence_info = [(det['name'], det['confidence']) for det in detections]
+                print(f"🔍 Objects detected: {confidence_info}")
+                
                 self.stable_objects = current_objects
                 self.persistent_objects.update(current_objects)
                 return detections
             else:
+                # Only clear stable objects if no detection, keep persistent ones
+                if self.stable_objects:
+                    print(f"🚫 No objects detected this frame")
                 self.stable_objects = set()
                 return []
         except Exception as e:
+            print(f"⚠️ Object detection error: {e}")
             self.stable_objects = set()
             return []
     
@@ -409,11 +495,17 @@ class BuddyPi:
         cv2.putText(frame, status, (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         
-        # Show detected objects in text
+        # Show detected objects in text with more info
         if self.persistent_objects:
             objects_text = f"Objects: {', '.join(list(self.persistent_objects)[:3])}"
             cv2.putText(frame, objects_text, (10, 60), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+        
+        # Show current frame objects
+        if self.stable_objects:
+            current_text = f"Current: {', '.join(list(self.stable_objects)[:2])}"
+            cv2.putText(frame, current_text, (10, 80), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
         
         return frame
     
@@ -470,22 +562,23 @@ class BuddyPi:
     def _process_input(self, user_text):
         """Process user input"""
         try:
-            # Check if user is introducing themselves
+            # Check if user is introducing themselves (be more specific)
             if any(phrase in user_text.lower() for phrase in ['my name is', 'i am', "i'm"]):
-                # Extract name and register face
+                # Extract name and register face - only single words
                 name = self._extract_name(user_text)
-                if name and self.active_user != name:
-                    # Use the last processed frame instead of capturing new one
-                    if hasattr(self, 'last_frame') and self.last_frame is not None:
-                        faces = self.detector.detect(self.last_frame)
-                        if faces:
-                            largest_face = self.detector.get_largest_face(faces)
-                            x, y, w, h = largest_face
-                            if w > 80 and h > 80:
-                                face_roi = self.last_frame[y:y+h, x:x+w]
-                                if self.face_recognizer.add_face(name, face_roi):
-                                    self.active_user = name
-                                    print(f"Registered new face for: {name}")
+                if name and len(name.split()) == 1 and name.isalpha() and len(name) > 1:
+                    if self.active_user != name:
+                        # Use the last processed frame instead of capturing new one
+                        if hasattr(self, 'last_frame') and self.last_frame is not None:
+                            faces = self.detector.detect(self.last_frame)
+                            if faces:
+                                largest_face = self.detector.get_largest_face(faces)
+                                x, y, w, h = largest_face
+                                if w > 80 and h > 80:
+                                    face_roi = self.last_frame[y:y+h, x:x+w]
+                                    if self.face_recognizer.add_face(name, face_roi):
+                                        self.active_user = name
+                                        print(f"Registered new face for: {name}")
             
             response = self._call_brain_service(user_text, self.active_user)
             self._display_response(response)

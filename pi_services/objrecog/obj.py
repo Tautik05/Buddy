@@ -105,7 +105,10 @@ class ObjectDetector:
             return []
     
     def draw_detections(self, frame, detections):
-        """Draw detections on frame"""
+        """Draw detections on frame with proper visual feedback"""
+        if not detections:
+            return frame
+            
         for detection in detections:
             name = detection['name']
             confidence = detection['confidence']
@@ -116,20 +119,46 @@ class ObjectDetector:
             elif confidence > 0.6:
                 color = (0, 255, 255)  # Yellow - medium confidence
             else:
-                color = (0, 0, 255)  # Red - low confidence
+                color = (0, 165, 255)  # Orange - low confidence
             
-            # Draw colored border around frame
             h, w = frame.shape[:2]
-            cv2.rectangle(frame, (5, 5), (w-5, h-5), color, 6)
             
-            # Draw label
-            label = f"{name} {confidence:.2f}"
-            cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
+            # Draw thick colored border around entire frame
+            border_thickness = 8
+            cv2.rectangle(frame, (0, 0), (w, h), color, border_thickness)
             
-            # Draw object icon
+            # Draw detection box in center (simulated object location)
+            center_x, center_y = w // 2, h // 2
+            box_size = 150
+            x1 = center_x - box_size // 2
+            y1 = center_y - box_size // 2
+            x2 = center_x + box_size // 2
+            y2 = center_y + box_size // 2
+            
+            # Draw detection box
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+            
+            # Draw label with background
+            label = f"{name.upper()} {confidence:.1%}"
+            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+            
+            # Label background
+            cv2.rectangle(frame, (x1, y1-35), (x1 + label_size[0] + 10, y1), color, -1)
+            
+            # Label text
+            cv2.putText(frame, label, (x1 + 5, y1 - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+            
+            # Draw object icon in corner
             if "bottle" in name.lower():
-                cv2.putText(frame, "🍼", (w-60, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
+                cv2.putText(frame, "BOTTLE", (w-120, 40), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             elif "cup" in name.lower():
-                cv2.putText(frame, "☕", (w-60, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
+                cv2.putText(frame, "CUP", (w-80, 40), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            
+            # Add detection indicator
+            cv2.circle(frame, (30, 30), 15, color, -1)
+            cv2.putText(frame, "!", (25, 37), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
         
         return frame
