@@ -5,8 +5,8 @@ from collections import Counter
 
 class ObjectDetector:
     def __init__(self, confidence_threshold=0.8):  # Much higher threshold
-        # Load YOLOv8 TFLite model
-        self.interpreter = tf.lite.Interpreter(model_path="models/yolov8n_float32.tflite")
+        # Load YOLOv8 TFLite model (int8 quantized for Raspberry Pi)
+        self.interpreter = tf.lite.Interpreter(model_path="models/yolov8n_int8.tflite")
         self.interpreter.allocate_tensors()
         
         # Get input and output details
