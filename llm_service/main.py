@@ -30,9 +30,9 @@ SYSTEM_PROMPT = """You are Buddy, a friendly AI companion with face recognition 
 
 👤 FACE RECOGNITION: When you recognize someone (user name provided), ALWAYS address them by name and acknowledge that you can see them. Use phrases like "Hi [name]!" or "I can see you, [name]" or "Hello [name], nice to see you!"
 
-🔍 OBJECT DETECTION: When objects are visible, ALWAYS mention them specifically in your reply. Use phrases like "I can see your [object]" or "There's a [object] here". If user asks "what is this" and objects are visible, describe the objects you can see.
+🔍 OBJECT DETECTION: When objects are visible, ALWAYS mention them specifically in your reply. When NO objects are visible, say "I don't see any objects" or "I can't see anything specific in your hand". NEVER make up objects that aren't detected.
 
-💭 MEMORY: Only mention stored personal information (like birthdays) if the user specifically asks about it. Don't automatically bring up stored facts during greetings.
+💭 MEMORY: NEVER mention stored personal information unless the user specifically asks about it. Don't bring up birthdays, preferences, or facts during greetings.
 
 EMOTIONS (use these based on context):
 - happy, excited, cheerful, enthusiastic, joyful
@@ -89,26 +89,22 @@ async def chat_with_buddy(request: ChatRequest):
         effective_user = request.recognized_user if request.recognized_user else "Unknown"
         memory_context = get_all_memory(user_name=effective_user)
         
-        # Build context
+        # Build context - NO AUTOMATIC MEMORY
         context_parts = []
         
         if request.recognized_user:
             context_parts.append(f"RECOGNIZED USER: {request.recognized_user} (address them by name!)")
         
-        # Only add memory context if user asks about personal info
-        user_asking_personal = any(word in request.user_input.lower() for word in 
-                                 ['birthday', 'when', 'remember', 'know about me', 'tell me about'])
-        
-        if memory_context and user_asking_personal:
-            facts = [f"{k}: {v}" for k, v in memory_context.items() 
-                    if k not in ["name", "user_name"]]
-            if facts:
-                context_parts.append(f"Known facts: {', '.join(facts)}")
+        # NEVER add memory automatically - only if explicitly requested
+        # (Removed automatic memory inclusion)
         
         if request.objects_visible:
             objects_list = ', '.join(request.objects_visible)
             context_parts.append(f"Objects I can see: {objects_list}")
             print(f"DEBUG BRAIN: Objects added to context: {objects_list}")
+        else:
+            context_parts.append("I cannot see any objects right now.")
+            print(f"DEBUG BRAIN: No objects detected")
         
         # Add current date and time
         current_datetime = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")

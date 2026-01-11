@@ -4,7 +4,7 @@ import numpy as np
 from collections import Counter
 
 class ObjectDetector:
-    def __init__(self, confidence_threshold=0.6):
+    def __init__(self, confidence_threshold=0.8):  # Much higher threshold
         # Load YOLOv8 TFLite model
         self.interpreter = tf.lite.Interpreter(model_path="models/yolov8n_float32.tflite")
         self.interpreter.allocate_tensors()
@@ -30,22 +30,21 @@ class ObjectDetector:
             'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
         ]
         
-        # More common objects that YOLO can actually detect
+        # Only most reliable objects
         self.target_classes = {
-            'bottle', 'cup', 'cell phone', 'laptop', 'book', 'mouse', 'keyboard',
-            'tv', 'remote', 'chair', 'clock', 'vase', 'potted plant',
-            'spoon', 'fork', 'knife', 'bowl', 'banana', 'apple', 'orange'
+            'bottle', 'cup', 'laptop', 'book', 'spoon', 'fork', 'knife', 'bowl'
         }
         
-        # Lower minimum areas
+        # Much higher minimum areas to reduce false positives
         self.min_areas = {
-            'cell phone': 1000,
-            'laptop': 5000,
-            'cup': 800,
-            'bottle': 1000,
-            'book': 2000,
-            'mouse': 500,
-            'keyboard': 3000
+            'bottle': 3000,
+            'cup': 2000,
+            'laptop': 10000,
+            'book': 4000,
+            'spoon': 1000,
+            'fork': 1000,
+            'knife': 1000,
+            'bowl': 3000
         }
 
     def preprocess_image(self, image):
@@ -74,77 +73,88 @@ class ObjectDetector:
             # Get output
             output_data = self.interpreter.get_tensor(self.output_details[0]['index'])
             
-            print(f"DEBUG: YOLO output shape: {output_data.shape}")
-            print(f"DEBUG: Output sample: {output_data[0][:5] if len(output_data[0]) > 5 else output_data[0]}")
+            # Process detections with strict filtering
+            detections = self.process_detections_strict(output_data[0], frame.shape)
             
-            # Process detections
-            detections = self.process_detections(output_data[0], frame.shape)
+            print(f"DEBUG: Found {len(detections)} valid detections")
+            for det in detections:
+                print(f"DEBUG: {det['name']} - {det['confidence']:.2f} (area: {det['area']:.0f})")
             
-            print(f"DEBUG: Raw detections: {len(detections)}")
-            for det in detections[:3]:  # Show first 3
-                print(f"DEBUG: {det['name']} - {det['confidence']:.2f}")
-            
-            # Filter by target classes and minimum area
-            for detection in detections:
-                if detection['name'] in self.target_classes:
-                    area = detection['area']
-                    min_area = self.min_areas.get(detection['name'], 1500)
-                    if area >= min_area:
-                        detected_objects.append(detection)
-            
-            print(f"DEBUG: Filtered detections: {[d['name'] for d in detected_objects]}")
-            
-            # Keep only top 2 detections
-            detected_objects.sort(key=lambda x: x['confidence'], reverse=True)
-            return detected_objects[:2]
+            return detections[:1]  # Only return top 1 detection
             
         except Exception as e:
             print(f"Detection error: {e}")
             return []
     
-    def process_detections(self, output, original_shape):
-        """Process YOLO output to get bounding boxes and classes"""
+    def process_detections_strict(self, output, original_shape):
+        """Process YOLO output with strict filtering"""
         detections = []
         
-        # YOLO output format: [batch, num_detections, 85] where 85 = 4 (bbox) + 1 (conf) + 80 (classes)
-        for detection in output:
-            # Extract confidence and class scores
-            confidence = detection[4]
-            class_scores = detection[5:]
+        try:
+            # Handle different output shapes
+            if len(output.shape) == 1:
+                # Reshape if needed
+                if output.shape[0] == 8400 * 84:
+                    output = output.reshape(8400, 84)
+                else:
+                    print(f"DEBUG: Unexpected output shape: {output.shape}")
+                    return []
             
-            if confidence > self.confidence_threshold:
+            print(f"DEBUG: Processing output shape: {output.shape}")
+            
+            # YOLOv8 output format: [8400, 84] where 84 = 4 (bbox) + 80 (classes)
+            for i in range(min(output.shape[0], 1000)):  # Limit processing
+                detection = output[i]
+                
+                # Extract bounding box (center_x, center_y, width, height)
+                center_x, center_y, width, height = detection[:4]
+                
+                # Extract class scores (no objectness in YOLOv8)
+                class_scores = detection[4:]
+                
                 # Get class with highest score
                 class_id = np.argmax(class_scores)
                 class_confidence = class_scores[class_id]
                 
+                # Very strict confidence filtering
                 if class_confidence > self.confidence_threshold:
-                    # Extract bounding box (center_x, center_y, width, height)
-                    center_x, center_y, width, height = detection[:4]
-                    
-                    # Convert to corner coordinates and scale to original image
-                    orig_h, orig_w = original_shape[:2]
-                    x1 = int((center_x - width/2) * orig_w / self.input_size)
-                    y1 = int((center_y - height/2) * orig_h / self.input_size)
-                    x2 = int((center_x + width/2) * orig_w / self.input_size)
-                    y2 = int((center_y + height/2) * orig_h / self.input_size)
-                    
-                    # Ensure coordinates are within image bounds
-                    x1 = max(0, min(x1, orig_w))
-                    y1 = max(0, min(y1, orig_h))
-                    x2 = max(0, min(x2, orig_w))
-                    y2 = max(0, min(y2, orig_h))
-                    
-                    area = (x2 - x1) * (y2 - y1)
-                    
-                    if area > 0 and class_id < len(self.class_names):
-                        detections.append({
-                            'name': self.class_names[class_id],
-                            'confidence': float(confidence * class_confidence),
-                            'bbox': [x1, y1, x2, y2],
-                            'area': area
-                        })
-        
-        return detections
+                    if class_id < len(self.class_names):
+                        class_name = self.class_names[class_id]
+                        
+                        # Only process target classes
+                        if class_name in self.target_classes:
+                            # Convert to corner coordinates and scale to original image
+                            orig_h, orig_w = original_shape[:2]
+                            x1 = int((center_x - width/2) * orig_w / self.input_size)
+                            y1 = int((center_y - height/2) * orig_h / self.input_size)
+                            x2 = int((center_x + width/2) * orig_w / self.input_size)
+                            y2 = int((center_y + height/2) * orig_h / self.input_size)
+                            
+                            # Ensure coordinates are within image bounds
+                            x1 = max(0, min(x1, orig_w))
+                            y1 = max(0, min(y1, orig_h))
+                            x2 = max(0, min(x2, orig_w))
+                            y2 = max(0, min(y2, orig_h))
+                            
+                            area = (x2 - x1) * (y2 - y1)
+                            min_area = self.min_areas.get(class_name, 3000)
+                            
+                            # Strict area filtering
+                            if area >= min_area:
+                                detections.append({
+                                    'name': class_name,
+                                    'confidence': float(class_confidence),
+                                    'bbox': [x1, y1, x2, y2],
+                                    'area': area
+                                })
+            
+            # Sort by confidence and return only the best
+            detections.sort(key=lambda x: x['confidence'], reverse=True)
+            return detections
+            
+        except Exception as e:
+            print(f"DEBUG: Detection processing error: {e}")
+            return []
     
     def _remove_overlaps(self, detections):
         """Remove overlapping detections that might be the same object"""
