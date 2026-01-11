@@ -63,6 +63,9 @@ class BuddyPi:
         self.running = False
         self.is_speaking = False
         self.active_user = None
+        self.sleep_mode = False
+        self.failed_listen_attempts = 0
+        self.max_failed_attempts = 4
         
         # Face recognition robustness
         self.recognition_attempts = {}
@@ -547,16 +550,22 @@ class BuddyPi:
     
     def _delayed_listening(self):
         """Start listening after a delay"""
-        if not self.running:  # Check if still running
+        if not self.running or self.sleep_mode:
             return
             
         user_text = self.listen_for_speech(timeout=6.0)
         
         if user_text:
+            self.failed_listen_attempts = 0  # Reset counter on successful input
             self._play_thinking_sound()
             threading.Thread(target=self._process_input, args=(user_text,), daemon=True).start()
         else:
-            if self.running:  # Only continue if still running
+            self.failed_listen_attempts += 1
+            print(f"🔇 No input attempt {self.failed_listen_attempts}/{self.max_failed_attempts}")
+            
+            if self.failed_listen_attempts >= self.max_failed_attempts:
+                self._enter_sleep_mode()
+            elif self.running:
                 threading.Timer(1.0, self._delayed_listening).start()
     
     def _process_input(self, user_text):
@@ -585,6 +594,36 @@ class BuddyPi:
         except Exception as e:
             print(f"Error processing input: {e}")
     
+    def _enter_sleep_mode(self):
+        """Trigger sleep mode - ends conversation loop"""
+        print("\n😴 Entering sleep mode...")
+        self.sleep_mode = True
+        # The conversation loop will detect this and exit, starting sleep loop
+    
+    def _wake_up_and_restart(self):
+        """Wake up and restart conversation loop"""
+        print("😊 Waking up!")
+        self.sleep_mode = False
+        self.failed_listen_attempts = 0
+        
+        # Quick greeting
+        self.speak("I'm awake! Let me see who's here.")
+        time.sleep(1)
+        
+        # Quick face recognition
+        recognized_user = self._force_face_recognition()
+        if recognized_user:
+            self.active_user = recognized_user
+            response = self._call_brain_service(
+                "I just woke up. Greet them warmly.",
+                recognized_user=recognized_user
+            )
+        else:
+            response = self._call_brain_service("I just woke up. Say hello.")
+        
+        self._display_response(response)
+        # The sleep loop will detect sleep_mode=False and exit, restarting conversation loop
+    
     def _extract_name(self, text: str) -> str:
         """Extract name from introduction text"""
         text = text.lower()
@@ -597,30 +636,102 @@ class BuddyPi:
         return ""
     
     def run(self):
-        """Main application loop"""
+        """Main application loop with independent sleep/wake cycles"""
         self.running = True
-        self.last_frame = None  # Store last frame for face registration
         
         try:
-            while self.running:
-                ret, frame = self.cap.read()
-                if not ret:
-                    continue
-                
-                self.last_frame = frame.copy()  # Store frame for registration
-                processed, face_detected, name, confidence = self._process_frame(frame)
-                cv2.imshow('Buddy Vision', processed)
-                
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    break
-        
+            # Start with conversation loop
+            self._conversation_loop()
         except KeyboardInterrupt:
-            print("\n")
+            print("\n⚠️ Keyboard interrupt received")
+            self.running = False
         except Exception as e:
             self.logger.error(f"Main loop error: {e}")
         finally:
             self.cleanup()
+    
+    def _conversation_loop(self):
+        """Active conversation loop with camera and face detection"""
+        print("🎯 Starting conversation loop")
+        self.last_frame = None
+        self.failed_listen_attempts = 0
+        
+        while self.running and not self.sleep_mode:
+            # Camera and face detection
+            ret, frame = self.cap.read()
+            if not ret:
+                continue
+            
+            self.last_frame = frame.copy()
+            processed, face_detected, name, confidence = self._process_frame(frame)
+            cv2.imshow('Buddy Vision', processed)
+            
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                self.running = False
+                break
+        
+        # If we exit due to sleep mode, start sleep loop
+        if self.sleep_mode and self.running:
+            self._sleep_loop()
+    
+    def _sleep_loop(self):
+        """Independent sleep loop - only wake word detection"""
+        print("😴 Starting sleep loop")
+        
+        # Close OpenCV window
+        try:
+            cv2.destroyAllWindows()
+            print("📺 OpenCV window closed")
+        except:
+            pass
+        
+        # Say goodnight
+        self.speak("Going to sleep. Say 'Hey Buddy' to wake me up.")
+        time.sleep(2)
+        
+        print("😴 Sleep mode active. Listening for 'Hey Buddy'...")
+        
+        # Sleep loop - only wake word detection
+        while self.running and self.sleep_mode:
+            try:
+                print("🎧 [SLEEP] Listening for wake word...")
+                with self.microphone as source:
+                    audio = self.speech_recognizer.listen(source, timeout=1, phrase_time_limit=2)
+                
+                print("🔄 [SLEEP] Processing audio...")
+                try:
+                    text = self.speech_recognizer.recognize_google(audio, language='en-IN')
+                    text_lower = text.lower()
+                    print(f"🎤 [SLEEP] Heard: '{text}'")
+                    
+                    # Check for wake words
+                    if any(phrase in text_lower for phrase in ['hey buddy', 'wake up', 'buddy wake up']):
+                        print(f"✅ [SLEEP] Wake word detected: '{text}'")
+                        self._wake_up_and_restart()
+                        break
+                    else:
+                        print(f"❌ [SLEEP] Not a wake word: '{text}'")
+                        
+                except sr.UnknownValueError:
+                    print("🔇 [SLEEP] Could not understand audio")
+                except sr.RequestError as e:
+                    print(f"❌ [SLEEP] Speech service error: {e}")
+                    time.sleep(0.5)
+                    
+            except sr.WaitTimeoutError:
+                pass  # Normal timeout
+            except KeyboardInterrupt:
+                print("\n⚠️ [SLEEP] Interrupted during sleep mode")
+                self.running = False
+                break
+            except Exception as e:
+                print(f"❌ [SLEEP] Wake detection error: {e}")
+                time.sleep(0.5)
+        
+        # If we exit sleep due to wake up, restart conversation loop
+        if not self.sleep_mode and self.running:
+            self._conversation_loop()
     
     def cleanup(self):
         """Clean up resources"""
