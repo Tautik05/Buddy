@@ -15,8 +15,11 @@ class ObjectDetector:
             print(f"❌ Teachable Machine model not found: {model_path}")
             raise FileNotFoundError(f"Model file not found: {model_path}")
         
-        # Load model
-        self.interpreter = tf.lite.Interpreter(model_path=model_path)
+        # Load model with Pi-specific fixes
+        self.interpreter = tf.lite.Interpreter(
+            model_path=model_path,
+            experimental_delegates=[]  # Disable XNNPACK to prevent crashes on Pi
+        )
         self.interpreter.allocate_tensors()
         
         # Get input and output details
@@ -53,15 +56,15 @@ class ObjectDetector:
         # Convert BGR to RGB
         rgb_image = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         
-        # Handle different input types
+        # Handle different input types with proper np.float32 conversion
         if self.input_details[0]['dtype'] == np.uint8:
             # Keep as uint8 (0-255)
             processed = rgb_image.astype(np.uint8)
         else:
-            # Normalize to float32 (0-1)
-            processed = rgb_image.astype(np.float32) / 255.0
+            # Ensure exactly np.float32 for Pi compatibility
+            processed = np.array(rgb_image, dtype=np.float32) / 255.0
         
-        # Add batch dimension
+        # Add batch dimension - ensure shape is correct
         processed = np.expand_dims(processed, axis=0)
         return processed
     
