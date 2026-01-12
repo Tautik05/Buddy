@@ -1,5 +1,6 @@
 # Core Computer Vision and ML
 opencv-python==4.8.1.78
+
 numpy>=1.26.0,<2.0
 tensorflow>=2.16.0
 scipy>=1.12.0
@@ -9,6 +10,8 @@ psycopg2-binary==2.9.7
 python-dotenv==1.0.0
 
 # HTTP Requests
+
+numpy==1.24.3
 requests==2.31.0
 
 # Speech Recognition and TTS

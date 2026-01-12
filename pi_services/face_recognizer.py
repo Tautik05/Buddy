@@ -20,8 +20,11 @@ class FaceRecognizer:
         self.config = config
         self.logger = logging.getLogger(__name__)
         
-        # Load TensorFlow Lite model
-        self.interpreter = tf.lite.Interpreter(model_path=model_path)
+        # Load TensorFlow Lite model with Pi-specific fixes
+        self.interpreter = tf.lite.Interpreter(
+            model_path=model_path, 
+            experimental_delegates=[]  # Disable XNNPACK to prevent crashes on Pi
+        )
         self.interpreter.allocate_tensors()
         
         # Get input and output details
@@ -40,9 +43,10 @@ class FaceRecognizer:
     def preprocess_face(self, face_img: np.ndarray) -> np.ndarray:
         """Preprocess face image for TFLite model"""
         face_resized = cv2.resize(face_img, (112, 112))
-        face_normalized = face_resized.astype(np.float32) / 255.0  # 0-1 normalization
-        # Keep HWC format for TFLite (Height, Width, Channels)
-        return np.expand_dims(face_normalized, axis=0)  # Add batch dimension
+        # Ensure exactly np.float32 and correct shape [1, 112, 112, 3]
+        face_normalized = face_resized.astype(np.float32) / 255.0
+        face_normalized = np.expand_dims(face_normalized, axis=0)  # Add batch dimension
+        return face_normalized
     
     def get_embedding(self, face_img: np.ndarray) -> np.ndarray:
         """Extract face embedding from image"""
