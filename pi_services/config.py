@@ -57,6 +57,9 @@ class Config:
     log_file: Optional[str] = "buddy.log"
     log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     
+    # LLM Service Configuration
+    llm_service_url: str = "http://192.168.31.150:8000"
+    
     @classmethod
     def from_env(cls) -> 'Config':
         """Load configuration from environment variables"""
@@ -64,4 +67,5 @@ class Config:
         config.model_path = os.getenv('BUDDY_MODEL_PATH', config.model_path)
         config.camera_index = int(os.getenv('BUDDY_CAMERA_INDEX', str(config.camera_index)))
         config.log_level = os.getenv('BUDDY_LOG_LEVEL', config.log_level)
+        config.llm_service_url = os.getenv('LLM_SERVICE_URL', config.llm_service_url)
         return config

@@ -31,9 +31,9 @@ import io
 class BuddyPi:
     """Pi Hardware Service - connects to brain via API"""
     
-    def __init__(self, config: Optional[Config] = None, llm_service_url: str = "http://localhost:8000"):
+    def __init__(self, config: Optional[Config] = None, llm_service_url: Optional[str] = None):
         self.config = config or Config.from_env()
-        self.llm_service_url = llm_service_url
+        self.llm_service_url = llm_service_url or self.config.llm_service_url
         self._setup_logging()
         self.logger = logging.getLogger(__name__)
         
@@ -764,14 +764,13 @@ def main():
     try:
         config = Config.from_env()
         
-        import os
-        llm_url = os.getenv('LLM_SERVICE_URL', 'http://localhost:8000')
+        llm_url = config.llm_service_url
         
         print(f"🤖 Starting Buddy Pi...")
         print(f"🔗 LLM Service: {llm_url}")
         print(f"📷 Camera: {config.camera_index}")
         
-        buddy = BuddyPi(config, llm_url)
+        buddy = BuddyPi(config)
         buddy.run()
         
         return 0

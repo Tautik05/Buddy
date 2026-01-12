@@ -1015,6 +1015,11 @@ async def _smart_extract_and_save_memory(user_input: str, user_name: str) -> Opt
     
     return None
 
+@app.get("/")
+async def root():
+    """Root endpoint showing service status"""
+    return {"message": "Buddy Enhanced Brain Service is running!", "status": "active"}
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
